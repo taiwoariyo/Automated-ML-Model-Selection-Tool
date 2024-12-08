@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import pip
@@ -35,12 +34,20 @@ def load_data(file_path):
 
 def preprocess_data(data):
     """Preprocess data by handling missing values, encoding, and scaling."""
-    # Handle missing values
+    # Handle missing values for numerical and categorical columns
+    numerical_cols = data.select_dtypes(include=[np.number]).columns
+    categorical_cols = data.select_dtypes(include=[object]).columns
+
+    # Impute numerical columns
     imputer = SimpleImputer(strategy='mean')
-    data_filled = imputer.fit_transform(data.select_dtypes(include=[np.number]))
+    data[numerical_cols] = imputer.fit_transform(data[numerical_cols])
+
+    # Impute categorical columns (if any)
+    if categorical_cols:
+        cat_imputer = SimpleImputer(strategy='most_frequent')
+        data[categorical_cols] = cat_imputer.fit_transform(data[categorical_cols])
 
     # Encode categorical variables (if any)
-    categorical_cols = data.select_dtypes(include=[object]).columns
     encoder = OneHotEncoder(drop='first', sparse=False)
     if len(categorical_cols) > 0:
         encoded_data = encoder.fit_transform(data[categorical_cols])
@@ -51,8 +58,7 @@ def preprocess_data(data):
     # Standardize numerical features
     scaler = StandardScaler()
     data_scaled = scaler.fit_transform(data.select_dtypes(include=[np.number]))
-
-    return pd.DataFrame(data_scaled, columns=data.select_dtypes(include=[np.number]).columns), data_filled
+    return pd.DataFrame(data_scaled, columns=data.select_dtypes(include=[np.number]).columns), data
 
 def split_data(data, target_column):
     """Split data into train and test sets."""
@@ -138,10 +144,17 @@ def streamlit_app():
         st.write("Dataset loaded successfully!", data.head())
 
         target_column = st.text_input("Enter the target column name:")
-        if target_column and target_column in data.columns:
+        if target_column:
+            if target_column not in data.columns:
+                st.error(f"Target column '{target_column}' not found in the dataset.")
+                return
+
             X_train, X_test, y_train, y_test = split_data(data, target_column)
 
             task_type = st.radio("Select task type", ('Classification', 'Regression')).lower()
+            if task_type not in ['classification', 'regression']:
+                st.error("Please select a valid task type: Classification or Regression.")
+                return
 
             # Preprocess data
             X_train_processed, _ = preprocess_data(X_train)
@@ -167,25 +180,27 @@ def streamlit_app():
             st.write(f"Best model: {best_model_name}")
             model = dict(models)[best_model_name]
 
-            param_grid = {
+            param_grids = {
                 'Random Forest': {'n_estimators': [50, 100, 200], 'max_depth': [10, 20, 30]},
                 'SVM': {'C': [0.1, 1, 10], 'kernel': ['linear', 'rbf']},
                 'XGBoost': {'n_estimators': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.3]},
                 'LightGBM': {'num_leaves': [31, 50], 'learning_rate': [0.01, 0.1, 0.3]}
             }
 
-            best_model, best_params = tune_hyperparameters(model, X_train_processed, y_train,
-                                                           param_grid.get(best_model_name, {}), randomized_search=True)
-            st.write(f"Best hyperparameters for {best_model_name}: {best_params}")
-            st.write("Training the final model...")
+            param_grid = param_grids.get(best_model_name, {})
+            if param_grid:
+                best_model, best_params = tune_hyperparameters(model, X_train_processed, y_train, param_grid, randomized_search=True)
+                st.write(f"Best hyperparameters for {best_model_name}: {best_params}")
+            else:
+                best_model = model
 
-            # Train the best model
+            st.write("Training the final model...")
             best_model.fit(X_train_processed, y_train)
             save_model(best_model)
 
             st.write("Model trained and saved successfully!")
             st.download_button("Download the trained model", "best_model.pkl")
 
-#  Main
+# Main
 if __name__ == '__main__':
     streamlit_app()
