@@ -1,24 +1,12 @@
-import subprocess
-import sys
-
-# Function to upgrade pip and install necessary packages
-def upgrade_pip_and_install_packages():
-    # Upgrade pip
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-
-    # Install numpy version that does not require distutils (>=1.24.0)
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy>=1.24.0"])
-
-    # Install other dependencies
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "scikit-learn", "streamlit", "xgboost", "lightgbm", "matplotlib", "seaborn", "joblib"])
-
-# Run the function to ensure dependencies are up-to-date
-upgrade_pip_and_install_packages()
-
 import pandas as pd
 import numpy as np
-import pip
-
+import joblib
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import xgboost as xgb
+import lightgbm as lgb
+import streamlit as st
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
@@ -28,14 +16,6 @@ from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.metrics import accuracy_score, mean_squared_error
 from sklearn.pipeline import Pipeline
-import joblib
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-import xgboost as xgb
-import lightgbm as lgb
-
-import streamlit as st
 
 # Data Importing and Preprocessing
 def load_data(file_path):
