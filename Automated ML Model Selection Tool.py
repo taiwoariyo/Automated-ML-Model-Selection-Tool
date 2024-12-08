@@ -1,22 +1,19 @@
 import subprocess
 import sys
 
-# Function to ensure pip and required packages are installed
-def install_missing_package(package_name):
-    try:
-        # Try importing the package
-        __import__(package_name)
-    except ImportError:
-        print(f"{package_name} is not installed. Installing...")
-        # Install package using pip
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+# Function to upgrade pip and install necessary packages
+def upgrade_pip_and_install_packages():
+    # Upgrade pip
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
 
-# Upgrade pip to the latest version to ensure proper package installation
-subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+    # Install numpy version that does not require distutils (>=1.24.0)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy>=1.24.0"])
 
-# Install numpy (ensure it's >= 1.24 to avoid distutils issue in Python 3.12)
-install_missing_package('numpy')
-install_missing_package('streamlit')
+    # Install other dependencies
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas", "scikit-learn", "streamlit", "xgboost", "lightgbm", "matplotlib", "seaborn", "joblib"])
+
+# Run the function to ensure dependencies are up-to-date
+upgrade_pip_and_install_packages()
 
 import pandas as pd
 import numpy as np
@@ -194,7 +191,7 @@ def streamlit_app():
             }
 
             best_model, best_params = tune_hyperparameters(model, X_train_processed, y_train,
-                                                            param_grid.get(best_model_name, {}), randomized_search=True)
+                                                           param_grid.get(best_model_name, {}), randomized_search=True)
             st.write(f"Best hyperparameters for {best_model_name}: {best_params}")
             st.write("Training the final model...")
 
