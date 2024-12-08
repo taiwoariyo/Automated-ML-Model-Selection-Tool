@@ -1,7 +1,7 @@
 import subprocess
 import sys
 
-# Function to check and install missing packages
+# Function to ensure pip and required packages are installed
 def install_missing_package(package_name):
     try:
         # Try importing the package
@@ -11,13 +11,13 @@ def install_missing_package(package_name):
         # Install package using pip
         subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
 
-# Install distutils if missing
-install_missing_package('distutils')
+# Upgrade pip to the latest version to ensure proper package installation
+subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
 
-# Check if Streamlit is installed
+# Install numpy (ensure it's >= 1.24 to avoid distutils issue in Python 3.12)
+install_missing_package('numpy')
 install_missing_package('streamlit')
 
-# Import libraries after ensuring dependencies are installed
 import pandas as pd
 import numpy as np
 import pip
@@ -194,7 +194,7 @@ def streamlit_app():
             }
 
             best_model, best_params = tune_hyperparameters(model, X_train_processed, y_train,
-                                                           param_grid.get(best_model_name, {}), randomized_search=True)
+                                                            param_grid.get(best_model_name, {}), randomized_search=True)
             st.write(f"Best hyperparameters for {best_model_name}: {best_params}")
             st.write("Training the final model...")
 
