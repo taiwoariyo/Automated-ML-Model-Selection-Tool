@@ -20,14 +20,19 @@ from sklearn.pipeline import Pipeline
 # Data Importing and Preprocessing
 def load_data(file_path):
     """Load dataset from various file formats."""
-    if file_path.endswith('.csv'):
-        return pd.read_csv(file_path)
-    elif file_path.endswith('.xlsx'):
-        return pd.read_excel(file_path)
-    elif file_path.endswith('.json'):
-        return pd.read_json(file_path)
-    else:
-        raise ValueError("Unsupported file format. Please upload a CSV, Excel, or JSON file.")
+    try:
+        if file_path.endswith('.csv'):
+            return pd.read_csv(file_path)
+        elif file_path.endswith('.xlsx'):
+            return pd.read_excel(file_path)
+        elif file_path.endswith('.json'):
+            return pd.read_json(file_path)
+        else:
+            st.error("Unsupported file format. Please upload a CSV, Excel, or JSON file.")
+            return None
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        return None
 
 def preprocess_data(data):
     """Preprocess data by handling missing values, encoding, and scaling."""
@@ -103,7 +108,7 @@ def tune_hyperparameters(model, X_train, y_train, param_grid, randomized_search=
 # Save and Load Model
 def save_model(model, filename='best_model.pkl'):
     """Save the trained model to a file."""
-    joblib.dump(model, filename)
+    joblib.dump(model, os.path.join('models', filename))
 
 def load_model(filename='best_model.pkl'):
     """Load a saved model."""
@@ -121,7 +126,7 @@ def plot_results(results):
     plt.title("Model Evaluation Scores")
     plt.xlabel("Model")
     plt.ylabel("Score")
-    plt.show()
+    st.pyplot(plt)  # Streamlit-specific plotting
 
 # Streamlit Web Interface
 def streamlit_app():
@@ -131,56 +136,57 @@ def streamlit_app():
     uploaded_file = st.file_uploader("Upload Your Dataset", type=["csv", "xlsx", "json"])
     if uploaded_file is not None:
         data = load_data(uploaded_file)
-        st.write("Dataset loaded successfully!", data.head())
+        if data is not None:
+            st.write("Dataset loaded successfully!", data.head())
 
-        target_column = st.text_input("Enter the target column name:")
-        if target_column and target_column in data.columns:
-            X_train, X_test, y_train, y_test = split_data(data, target_column)
+            target_column = st.text_input("Enter the target column name:")
+            if target_column and target_column in data.columns:
+                X_train, X_test, y_train, y_test = split_data(data, target_column)
 
-            task_type = st.radio("Select task type", ('Classification', 'Regression')).lower()
+                task_type = st.radio("Select task type", ('Classification', 'Regression')).lower()
 
-            # Preprocess data
-            X_train_processed, _ = preprocess_data(X_train)
-            X_test_processed, _ = preprocess_data(X_test)
+                # Preprocess data
+                X_train_processed, _ = preprocess_data(X_train)
+                X_test_processed, _ = preprocess_data(X_test)
 
-            # Select models
-            models = get_classification_models() if task_type == 'classification' else get_regression_models()
+                # Select models
+                models = get_classification_models() if task_type == 'classification' else get_regression_models()
 
-            # Evaluate models
-            st.write("Evaluating models...")
-            results = evaluate_models(X_train_processed, y_train, models, task_type)
+                # Evaluate models
+                st.write("Evaluating models...")
+                results = evaluate_models(X_train_processed, y_train, models, task_type)
 
-            st.write("Model performance:")
-            for model_name, score in results.items():
-                st.write(f"{model_name}: {score:.4f}")
+                st.write("Model performance:")
+                for model_name, score in results.items():
+                    st.write(f"{model_name}: {score:.4f}")
 
-            # Visualize Results
-            st.write("Visualizing evaluation scores...")
-            plot_results(results)
+                # Visualize Results
+                st.write("Visualizing evaluation scores...")
+                plot_results(results)
 
-            # Hyperparameter Tuning
-            best_model_name = max(results, key=results.get)
-            st.write(f"Best model: {best_model_name}")
-            model = dict(models)[best_model_name]
+                # Hyperparameter Tuning
+                best_model_name = max(results, key=results.get)
+                st.write(f"Best model: {best_model_name}")
+                model = dict(models)[best_model_name]
 
-            param_grid = {
-                'Random Forest': {'n_estimators': [50, 100, 200], 'max_depth': [10, 20, 30]},
-                'SVM': {'C': [0.1, 1, 10], 'kernel': ['linear', 'rbf']},
-                'XGBoost': {'n_estimators': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.3]},
-                'LightGBM': {'num_leaves': [31, 50], 'learning_rate': [0.01, 0.1, 0.3]}
-            }
+                param_grid = {
+                    'Random Forest': {'n_estimators': [50, 100, 200], 'max_depth': [10, 20, 30]},
+                    'SVM': {'C': [0.1, 1, 10], 'kernel': ['linear', 'rbf']},
+                    'XGBoost': {'n_estimators': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.3]},
+                    'LightGBM': {'num_leaves': [31, 50], 'learning_rate': [0.01, 0.1, 0.3]}
+                }
 
-            best_model, best_params = tune_hyperparameters(model, X_train_processed, y_train,
-                                                           param_grid.get(best_model_name, {}), randomized_search=True)
-            st.write(f"Best hyperparameters for {best_model_name}: {best_params}")
-            st.write("Training the final model...")
+                best_model, best_params = tune_hyperparameters(model, X_train_processed, y_train,
+                                                               param_grid.get(best_model_name, {}), randomized_search=True)
+                st.write(f"Best hyperparameters for {best_model_name}: {best_params}")
+                st.write("Training the final model...")
 
-            # Train the best model
-            best_model.fit(X_train_processed, y_train)
-            save_model(best_model)
+                # Train the best model
+                best_model.fit(X_train_processed, y_train)
+                save_model(best_model)
 
-            st.write("Model trained and saved successfully!")
-            st.download_button("Download the trained model", "best_model.pkl")
+                st.write("Model trained and saved successfully!")
+                st.download_button("Download the trained model", "best_model.pkl")
 
 # Main
 if __name__ == '__main__':
