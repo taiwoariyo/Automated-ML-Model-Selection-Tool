@@ -5,108 +5,72 @@ A Streamlit-based app that automates the selection, training, and tuning of mach
 
 STEP 1: DEFINE PROJECT SCOPE
 
-
 PURPOSE: Select the best-performing machine learning tool based on a given data set.
-
-CRITERIA: Accuracy, Performance, Precision, recall, F1 score.
-
-INPUT: Dataset (CSV, Database)
-
+CRITERIA: Accuracy, Performance, Precision
+INPUT: Dataset (CSV, Xcel, JSON, Database)
 OUTPUT: Recommendation of best machine learning model based on criteria
-
-KEY FEATURES: 	Data Preprocessing 		Model Selection 		Model Evaluation		Metrics	User Interface	Model Persistence Visualizations
-
+KEY FEATURES: 	Data Preprocessing 		Model Selection 		Model Evaluation 		Metrics 		User Interface 		Model Persistence 		Visualizations
 
 
-STEP 2: ARCHITECTURE RESEARCH AND PLANNING
-
+STEP 2: ARCHITECTURE AND LIBRARIES
 
 PROGRAMMING LANGUAGE: Python
-
 Data Preprocessing: Pandas, NumPy, Scikit-Learn
-
 Model Selection: Scikit-Learn
-
 Model Evaluation: Scikit-Learn
-
-User Interface: Flask/Django
-
+User Interface: Streamlit
 Model Persistence: Joblib
-
 Visualizations: Matplotlib, Seaborn
-
 
 
 STEP 3: DATA COLLECTION AND PREPROCESSING AUTOMATION
 
-
-DATA IMPORTING:  	Pandas	 Acceptable Formats: CSV	Excel	Database
-
-DATA PREPROCESSING: 	Handle Missing Values 	Encode Categorical Variables 	Scaling 	Train-Test Split
-
+DATA IMPORTING:  Pandas 		
+DATA FORMAT:	    CSV	Excel	Database	JSON
+DATA PREPROCESSING: Handle Missing Values 	Encode Categorical Variables 						 Scaling 		Train-Test Split
 
 
 STEP 4: AUTOMATE MODEL SELECTION
 
-
 MODEL CANDIDATES:  		Classification 	Regression 		Clustering
-
-Classification:  		Logistic Regression 		Random Forest 	SVM		KNN
-
-Regression: 		Linear Regression 		Decision Trees 	
-
-Clustering: 		KMeans 	
-
+Classification:  	Logistic Regression 		Random Forest 	SVM		KNN 			XG Boost 		Light GBM
+Regression: 	Linear Regression 		Random Forest 	SVM		KNN 			XG Boost 		Light GBM
 
  
 STEP 5: MODEL EVALUATION USING CROSS-VALIDATION
 
-
-CLASSIFICATION EVALUATION: 	Accuracy Score 	Precision Score 	Recall 	F1 Score
-
-REGRESSION EVALUATION: 	Mean Squared Error (MSE) 		Root Mean Squared Error (RMSE) 		R2 Score
-
-CLUSTERING EVALUATION: 		Silhouette Score 		Davies-Bouldin
-
-SELECT THE BEST MODEL
+CLASSIFICATION EVALUATION:  	Accuracy Score 	
+REGRESSION EVALUATION: 	Mean Squared Error (MSE) 
 
 
-
-STEP 5: MODEL TUNING AND HYPERPARAMETER OPTIMIZATION
-
+STEP 6: MODEL TUNING AND HYPERPARAMETER OPTIMIZATION
 
 TECHNIQUE 1: 		Grid Search
-
-TECHNIQUE 2: 		Random Search
-
+TECHNIQUE 2: 		Randomized Search
 
 
-STEP 6: MODEL DEPLOYMENT AND SAVING
+STEP 7: MODEL DEPLOYMENT AND SAVING
+
+Save Model: 	Joblib
 
 
-Model Tuning
+STEP 8: MODEL VISUALIZATION
 
-Save Model Using: Joblib
+Plot Model: 	Matplotlib		 Seaborn
 
 
-
-STEP 7: USER INTERFACE (WEB-BASED)
-
+STEP 9: USER INTERFACE (WEB-BASED)
 
 WEB INTERFACE: 		Streamlit
 
 
 
-STEP 8: TESTING AND VALIDATION
+STEP 10: TESTING AND VALIDATION
+
+TEST WITH DATASETS:  		Large Datasets	Small Datasets
 
 
-TEST WITH DATASETS:  		Large Datasets	Small Datasets 	Edge Cases
+STEP 11: DEPLOYMENT AND MAINTENANCE
 
-
-
-STEP 9: DEPLOYMENT AND MAINTENANCE
-
-
-DEPLOY AS WEB APPLICATION USING: 	AWS 		Google Cloud 		Heroku
-
+DEPLOY AS WEB APPLICATION: 	AWS 		Google Cloud 								Docker
 REGULAR UPDATES: 	Based on User Feedback
