@@ -8,14 +8,14 @@ import seaborn as sns
 import xgboost as xgb
 import lightgbm as lgb
 import streamlit as st
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV, KFold
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.metrics import accuracy_score, mean_squared_error
+from sklearn.metrics import accuracy_score, mean_squared_error, classification_report, confusion_matrix
 from sklearn.pipeline import Pipeline
 
 # Data Importing and Preprocessing
@@ -31,9 +31,21 @@ def load_data(file_path):
         else:
             st.error("Unsupported file format. Please upload a CSV, Excel, or JSON file.")
             return None
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
+    except pd.errors.ParserError:
+        st.error("There was an error parsing the file. Please check the format or content.")
         return None
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+        return None
+
+def suggest_target_column(data):
+    """Auto-suggest the target column based on data types."""
+    numerical_cols = data.select_dtypes(include=[np.number]).columns
+    categorical_cols = data.select_dtypes(include=[object]).columns
+    if len(numerical_cols) > len(categorical_cols):
+        return numerical_cols  # Suggest numerical columns for regression
+    else:
+        return categorical_cols  # Suggest categorical columns for classification
 
 def preprocess_data(data):
     """Preprocess data by handling missing values, encoding, and scaling."""
@@ -129,6 +141,15 @@ def plot_results(results):
     plt.ylabel("Score")
     st.pyplot(plt)  # Streamlit-specific plotting
 
+def plot_confusion_matrix(y_true, y_pred):
+    """Plot the confusion matrix."""
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Class 0', 'Class 1'], yticklabels=['Class 0', 'Class 1'])
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    st.pyplot(plt)
+
 # Streamlit Web Interface
 def streamlit_app():
     st.title('Automated Machine Learning Model Selection Tool')
@@ -140,7 +161,8 @@ def streamlit_app():
         if data is not None:
             st.write("Dataset loaded successfully!", data.head())
 
-            target_column = st.text_input("Enter the target column name:")
+            # Auto-suggest target column
+            target_column = st.selectbox("Select the target column", suggest_target_column(data))
             if target_column and target_column in data.columns:
                 X_train, X_test, y_train, y_test = split_data(data, target_column)
 
@@ -188,6 +210,13 @@ def streamlit_app():
 
                 st.write("Model trained and saved successfully!")
                 st.download_button("Download the trained model", "best_model.pkl")
+
+                # Confusion matrix and performance metrics for classification
+                if task_type == 'classification':
+                    y_pred = best_model.predict(X_test_processed)
+                    st.write("Classification Report:")
+                    st.text(classification_report(y_test, y_pred))
+                    plot_confusion_matrix(y_test, y_pred)
 
 # Main
 if __name__ == '__main__':
