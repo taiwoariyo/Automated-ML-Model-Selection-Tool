@@ -40,6 +40,7 @@ def load_data(uploaded_file):
         st.error(f"Error while loading file: {e}")
         raise
 
+# --- 2. Data Preprocessing ---
 def preprocess_data(data):
     """Preprocess data by handling missing values, encoding, and scaling."""
     # Handle missing values
@@ -67,7 +68,7 @@ def split_data(data, target_column):
     y = data[target_column]
     return train_test_split(X, y, test_size=0.2, random_state=42)
 
-# --- 2. Model Selection ---
+# --- 3. Model Selection ---
 def get_classification_models():
     """Return a list of classification models."""
     return [
@@ -111,7 +112,7 @@ def tune_hyperparameters(model, X_train, y_train, param_grid, randomized_search=
     search.fit(X_train, y_train)
     return search.best_estimator_, search.best_params_
 
-# --- 3. Save and Load Model ---
+# --- 4. Save and Load Model ---
 def save_model(model, filename='best_model.pkl'):
     """Save the trained model to a file."""
     joblib.dump(model, filename)
@@ -120,7 +121,7 @@ def load_model(filename='best_model.pkl'):
     """Load a saved model."""
     return joblib.load(filename)
 
-# --- 4. Visualization ---
+# --- 5. Visualization ---
 def plot_results(results):
     """Visualize the model evaluation results."""
     model_names = list(results.keys())
@@ -134,7 +135,7 @@ def plot_results(results):
     plt.ylabel("Score")
     st.pyplot(plt)
 
-# --- 5. Streamlit Web Interface ---
+# --- 6. Streamlit Web Interface ---
 def streamlit_app():
     st.title('Automated Machine Learning Model Selection Tool')
 
@@ -209,4 +210,3 @@ def streamlit_app():
 if __name__ == '__main__':
     # Uncomment below line to use Streamlit version
     streamlit_app()
-
