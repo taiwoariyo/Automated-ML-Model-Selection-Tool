@@ -208,5 +208,7 @@ def streamlit_app():
             st.download_button("Download the trained model", "best_model.pkl")
 
 if __name__ == '__main__':
-    # Uncomment below line to use Streamlit version
     streamlit_app()
+
+# Run in Terminal
+#streamlit run automated_ml_tool.py
