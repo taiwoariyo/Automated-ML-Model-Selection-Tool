@@ -1,4 +1,3 @@
-# Uncomment below if code does not run
 #pip install --upgrade pip
 #streamlit run automated_ml_tool.py
 #pip install openpyxl
