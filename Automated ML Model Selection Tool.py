@@ -343,4 +343,4 @@ def streamlit_app():
 # --- Run the app ---
 if __name__ == "__main__":
     streamlit_app()
-#Run in terminal: streamlit run ml_tool_app.py
+#Run in terminal: streamlit run automated_ml_tool.py
