@@ -219,7 +219,7 @@ def run_grid_search(model_name, model, X_train, y_train):
         return model
 
     try:
-        st.write(f"🔍 Running Grid Search for {model_name}...")
+        st.write(f" Running Grid Search for {model_name}...")
         scoring = 'accuracy' if is_classifier(model) else 'neg_mean_squared_error'
         grid_search = GridSearchCV(model, param_grid, cv=3, scoring=scoring, n_jobs=-1)
         grid_search.fit(X_train, y_train)
