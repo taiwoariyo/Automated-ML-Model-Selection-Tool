@@ -159,13 +159,13 @@ def preprocess_data(df, target_column, apply_log_transform=True):
         # Log-transform skewed target
         skewness = y.skew()
         if abs(skewness) > 3 and apply_log_transform:
-            st.warning(f"⚠️ Target is highly skewed (skew = {skewness:.2f}). Applying log1p transform.")
+            st.warning(f" Target is highly skewed (skew = {skewness:.2f}). Applying log1p transform.")
             y = np.log1p(y)
             valid_idx = y.replace([np.inf, -np.inf], np.nan).dropna().index
             X_final = X_final.loc[valid_idx]
             y = y.loc[valid_idx]
 
-        st.write(f"✅ Using {X_final.shape[0]} rows and {X_final.shape[1]} features.")
+        st.write(f" Using {X_final.shape[0]} rows and {X_final.shape[1]} features.")
         return X_final, y
 
     except Exception as e:
@@ -223,7 +223,7 @@ def run_grid_search(model_name, model, X_train, y_train):
         scoring = 'accuracy' if is_classifier(model) else 'neg_mean_squared_error'
         grid_search = GridSearchCV(model, param_grid, cv=3, scoring=scoring, n_jobs=-1)
         grid_search.fit(X_train, y_train)
-        st.success(f"✅ Best Params for {model_name}: {grid_search.best_params_}")
+        st.success(f" Best Params for {model_name}: {grid_search.best_params_}")
         return grid_search.best_estimator_
     except Exception as e:
         st.warning(f"Grid search failed for {model_name}: {e}")
@@ -260,7 +260,7 @@ def plot_results(results):
 
 # --- Main Streamlit app ---
 def streamlit_app():
-    st.title("📊 AutoML Tool")
+    st.title(" AutoML Tool")
     st.write("Upload a dataset and let the tool do the work.")
 
     uploaded_file = st.file_uploader("Upload Your Dataset", type=["csv", "xlsx", "json"])
@@ -329,9 +329,9 @@ def streamlit_app():
                     mae = mean_absolute_error(y_test, y_pred)
                     r2 = r2_score(y_test, y_pred)
 
-                    st.write(f"📉 RMSE: {rmse:.2f}")
-                    st.write(f"📊 MAE: {mae:.2f}")
-                    st.write(f"📈 R² Score: {r2:.2f}")
+                    st.write(f" RMSE: {rmse:.2f}")
+                    st.write(f" MAE: {mae:.2f}")
+                    st.write(f" R² Score: {r2:.2f}")
 
                     # Save and download trained model
                     joblib.dump(model, "best_model.pkl")
