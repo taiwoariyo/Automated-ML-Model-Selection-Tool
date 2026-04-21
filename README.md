@@ -1,6 +1,24 @@
 # Automated-ML-Model-Selection-Tool
 A Streamlit-based app that automates the selection, training, and tuning of machine learning models for classification and regression tasks. Upload datasets, evaluate models, visualize performance, and fine-tune hyperparameters—all with an easy-to-use interface.
 
+## Run locally
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Deploy on Streamlit Community Cloud
+
+1. Push this folder to a GitHub repository.
+2. Go to Streamlit Community Cloud.
+3. Connect your GitHub account.
+4. Click **New app**.
+5. Select your repository and set the main file path to `app.py`.
+6. Choose a custom subdomain if available.
+7. Deploy.
+
+After deployment, your app will have a public URL ending in `.streamlit.app`.
 
 
 STEP 1: DEFINE PROJECT SCOPE
