@@ -2,47 +2,73 @@
 #streamlit run automated_ml_tool.py
 #pip install openpyxl
 
-# --- Import necessary libraries ---
-# Import standard libraries
-import io                  # lets us create an in-memory file for downloading the trained model
-import joblib              # used to save the trained pipeline/model
-import numpy as np         # numerical operations
-import pandas as pd        # data handling and cleaning
-import streamlit as st     # web app interface
-import matplotlib.pyplot as plt  # plotting charts
+# ============================================================
+# File: automated_ml_tool.py
+# Purpose:
+# A polished, public-facing Streamlit AutoML application that:
+# - loads CSV / Excel / JSON files
+# - cleans and profiles messy real-world datasets
+# - auto-detects classification vs regression
+# - compares multiple ML models
+# - evaluates the best model on a holdout test set
+# - allows optional hyperparameter tuning
+# - exports the trained pipeline for reuse
+#
+# Notes:
+# - This version emphasizes readability, strong comments,
+#   professional UI, and more robust data handling.
+# ============================================================
 
-# Import sklearn utilities and models
-from sklearn.base import is_classifier
+# -----------------------------
+# Standard library imports
+# -----------------------------
+import io
+import warnings
+from typing import Dict, List, Tuple, Optional
+
+# -----------------------------
+# Third-party imports
+# -----------------------------
+import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
     confusion_matrix,
-    mean_squared_error,
+    f1_score,
     mean_absolute_error,
+    mean_squared_error,
+    precision_score,
     r2_score,
+    recall_score,
 )
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 
-# Try to import XGBoost
-# If it is not installed, the program will continue without it
+# Silence noisy warnings to keep the public-facing experience cleaner
+warnings.filterwarnings("ignore")
+
+# -----------------------------
+# Optional gradient boosting libraries
+# The app still runs even if these are not installed
+# -----------------------------
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
 except Exception:
     XGBOOST_AVAILABLE = False
 
-# Try to import LightGBM
-# If it is not installed, the program will continue without it
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
@@ -50,155 +76,463 @@ except Exception:
     LIGHTGBM_AVAILABLE = False
 
 
-# Configure the Streamlit page settings
+# ============================================================
+# STREAMLIT PAGE SETUP
+# ============================================================
 st.set_page_config(
-    page_title="Free AutoML Tool",
-    page_icon="📊",
-    layout="wide"
+    page_title="AutoML Model Selection Tool",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Custom CSS for a more polished, launch-ready interface
+st.markdown(
+    """
+    <style>
+        .main {
+            background: linear-gradient(180deg, #07111f 0%, #0b1728 45%, #0f2036 100%);
+        }
+
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+        }
+
+        .hero-card {
+            background: linear-gradient(135deg, rgba(46,120,255,0.18), rgba(0,191,165,0.12));
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 18px;
+            padding: 1.4rem 1.4rem 1.1rem 1.4rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.18);
+        }
+
+        .section-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 16px;
+            padding: 1rem 1rem 0.8rem 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .tiny-note {
+            color: #b7c6d9;
+            font-size: 0.92rem;
+        }
+
+        .metric-label {
+            font-size: 0.95rem;
+            color: #c8d4e3;
+        }
+
+        h1, h2, h3 {
+            letter-spacing: 0.2px;
+        }
+
+        div[data-testid="stMetric"] {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            padding: 0.85rem;
+            border-radius: 14px;
+        }
+
+        div[data-testid="stDataFrame"] {
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .stButton > button {
+            border-radius: 12px;
+            padding: 0.6rem 1rem;
+            font-weight: 600;
+        }
+
+        .stDownloadButton > button {
+            border-radius: 12px;
+            padding: 0.6rem 1rem;
+            font-weight: 600;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
 
-# Function to make duplicate or messy column names unique and cleaner
-def make_column_names_unique(columns):
-    counts = {}          # stores count of repeated column names
-    new_columns = []     # stores cleaned/unique column names
+# ============================================================
+# HELPER FUNCTIONS: DATA LOADING / CLEANING
+# ============================================================
+def make_column_names_unique(columns: List[str]) -> List[str]:
+    """
+    Clean and make column names unique.
+
+    Why this matters:
+    Real datasets often contain duplicate headers, blank headers,
+    or headers with trailing spaces/newlines.
+
+    Example:
+    ["Age", "Age", " Salary "] becomes ["Age", "Age_1", "Salary"]
+    """
+    counts = {}
+    new_columns = []
 
     for col in columns:
-        # Convert column name to string, remove extra spaces/newlines
-        col = str(col).strip().replace("\n", " ")
+        # Convert any header object to string and clean it
+        clean_col = str(col).strip().replace("\n", " ")
 
-        # If column name appears for the first time, keep it
-        if col not in counts:
-            counts[col] = 0
-            new_columns.append(col)
+        # Replace empty-like headers with a default placeholder
+        if clean_col == "" or clean_col.lower() in {"nan", "none", "null"}:
+            clean_col = "Unnamed"
+
+        if clean_col not in counts:
+            counts[clean_col] = 0
+            new_columns.append(clean_col)
         else:
-            # If duplicate exists, add suffix like _1, _2, etc.
-            counts[col] += 1
-            new_columns.append(f"{col}_{counts[col]}")
+            counts[clean_col] += 1
+            new_columns.append(f"{clean_col}_{counts[clean_col]}")
 
     return new_columns
 
 
-# Function to load and clean uploaded dataset
-def load_and_clean_data(uploaded_file):
+def score_header_row(row: pd.Series) -> float:
+    """
+    Assign a simple score to a row to determine whether it looks like a header.
+
+    Higher score = more likely to be a real header row.
+
+    Signals that help a row look like a header:
+    - values are mostly strings
+    - not too many missing or unnamed cells
+    - values are reasonably unique
+    """
+    row_str = row.fillna("").astype(str).str.strip()
+
+    if len(row_str) == 0:
+        return -999
+
+    bad_tokens = {"", "nan", "null", "none", "unnamed"}
+    bad_ratio = row_str.str.lower().isin(bad_tokens).mean()
+    unique_ratio = row_str.nunique(dropna=False) / max(len(row_str), 1)
+    alpha_ratio = row_str.apply(lambda x: any(ch.isalpha() for ch in x)).mean()
+
+    # Weighted heuristic score
+    score = (alpha_ratio * 0.5) + (unique_ratio * 0.35) - (bad_ratio * 0.9)
+    return score
+
+
+def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 5) -> int:
+    """
+    Detect which row most likely contains the headers.
+
+    We inspect the first few rows and choose the one with the best score.
+    This makes the app more forgiving when files contain title rows or exports
+    with metadata above the actual header row.
+    """
+    rows_to_check = min(max_rows_to_check, len(raw_data))
+    if rows_to_check == 0:
+        return 0
+
+    best_row = 0
+    best_score = -999
+
+    for i in range(rows_to_check):
+        row_score = score_header_row(raw_data.iloc[i])
+        if row_score > best_score:
+            best_score = row_score
+            best_row = i
+
+    return best_row
+
+
+def try_read_csv(uploaded_file) -> pd.DataFrame:
+    """
+    Robust CSV reader with fallback encodings.
+    """
+    uploaded_file.seek(0)
     try:
-        # Convert file name to lowercase for easier extension checking
+        return pd.read_csv(uploaded_file, header=None)
+    except Exception:
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, header=None, encoding="latin1")
+
+
+def try_read_excel(uploaded_file) -> pd.DataFrame:
+    """
+    Robust Excel reader.
+    """
+    uploaded_file.seek(0)
+    return pd.read_excel(uploaded_file, engine="openpyxl", header=None)
+
+
+def try_read_json(uploaded_file) -> pd.DataFrame:
+    """
+    Robust JSON reader.
+    """
+    uploaded_file.seek(0)
+    data = pd.read_json(uploaded_file)
+
+    # If the JSON loads into a dictionary-like structure,
+    # normalize nested records when possible.
+    if isinstance(data, dict):
+        return pd.json_normalize(data)
+
+    if not isinstance(data, pd.DataFrame):
+        return pd.DataFrame(data)
+
+    return data
+
+
+def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
+    """
+    Load the uploaded dataset and apply first-pass cleaning.
+
+    Supported formats:
+    - CSV
+    - XLSX
+    - JSON
+
+    Cleaning steps:
+    - detect likely header row
+    - create unique cleaned column names
+    - remove fully empty rows and columns
+    - reset index
+    """
+    try:
         filename = uploaded_file.name.lower()
 
-        # Read CSV file
         if filename.endswith(".csv"):
-            raw_data = pd.read_csv(uploaded_file, header=None)
-
-        # Read Excel file
+            raw_data = try_read_csv(uploaded_file)
         elif filename.endswith(".xlsx"):
-            raw_data = pd.read_excel(uploaded_file, engine="openpyxl", header=None)
-
-        # Read JSON file
+            raw_data = try_read_excel(uploaded_file)
         elif filename.endswith(".json"):
-            raw_json = pd.read_json(uploaded_file)
-            raw_data = pd.json_normalize(raw_json) if isinstance(raw_json, dict) else raw_json
-
-        # Reject unsupported formats
+            raw_data = try_read_json(uploaded_file)
+            # If already structured correctly with real headers,
+            # lightly clean and return early.
+            if isinstance(raw_data, pd.DataFrame) and raw_data.columns.dtype != int:
+                raw_data.columns = make_column_names_unique(list(raw_data.columns))
+                raw_data = raw_data.dropna(axis=1, how="all").dropna(axis=0, how="all")
+                return raw_data.reset_index(drop=True)
         else:
             raise ValueError("Unsupported file format. Please upload CSV, XLSX, or JSON.")
 
-        # Ensure the loaded data is a DataFrame
         if not isinstance(raw_data, pd.DataFrame):
             raw_data = pd.DataFrame(raw_data)
 
-        # Try to detect which row should be treated as the header
-        header_row = 0
-        try:
-            sample = raw_data.iloc[0:3].fillna("").astype(str)
+        if raw_data.empty:
+            raise ValueError("The uploaded file appears to be empty.")
 
-            # Check first 3 rows and pick the one that looks most like real headers
-            for i in range(min(3, len(raw_data))):
-                row = sample.iloc[i]
+        header_row = detect_header_row(raw_data)
+        data = raw_data.iloc[header_row + 1:].copy()
 
-                # Bad header signals: blank values, unnamed, nan, null
-                bad_signals = row.str.lower().isin(["unnamed", "nan", "null", ""])
-
-                # If less than half are bad signals, use this row as header
-                if bad_signals.mean() < 0.5:
-                    header_row = i
-                    break
-        except Exception:
-            header_row = 0
-
-        # Separate actual data from header row
-        data = raw_data[header_row + 1:].copy()
-
-        # Set cleaned unique column names
-        data.columns = make_column_names_unique(raw_data.iloc[header_row])
+        # Use the chosen header row as column names
+        detected_columns = raw_data.iloc[header_row].tolist()
+        data.columns = make_column_names_unique(detected_columns)
 
         # Remove fully empty rows and columns
         data = data.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
 
+        # Try to convert numeric-looking columns where possible
+        for col in data.columns:
+            if data[col].dtype == "object":
+                converted = pd.to_numeric(data[col], errors="ignore")
+                data[col] = converted
+
         return data
 
     except Exception as e:
-        # Show error in Streamlit if file loading fails
         st.error(f"Failed to load the file: {e}")
         return None
 
 
-# Function to automatically detect whether task is classification or regression
-def auto_detect_task(y_series):
+# ============================================================
+# HELPER FUNCTIONS: DATA PROFILING / TASK DETECTION
+# ============================================================
+def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
+    """
+    Return a compact dataset quality profile for display.
+    """
+    total_cells = data.shape[0] * data.shape[1] if not data.empty else 0
+    missing_cells = int(data.isna().sum().sum()) if total_cells > 0 else 0
+    duplicate_rows = int(data.duplicated().sum()) if not data.empty else 0
+
+    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_cols = [c for c in data.columns if c not in numeric_cols]
+
+    return {
+        "rows": int(data.shape[0]),
+        "columns": int(data.shape[1]),
+        "missing_cells": missing_cells,
+        "missing_pct": round((missing_cells / total_cells) * 100, 2) if total_cells > 0 else 0.0,
+        "duplicate_rows": duplicate_rows,
+        "numeric_cols": len(numeric_cols),
+        "categorical_cols": len(categorical_cols),
+    }
+
+
+def auto_detect_task(y_series: pd.Series) -> str:
+    """
+    Automatically infer whether the task is classification or regression.
+
+    Rule of thumb:
+    - Numeric target with many unique values -> regression
+    - Otherwise -> classification
+    """
     y_non_null = y_series.dropna()
 
-    # If target column is empty, default to classification
     if y_non_null.empty:
         return "classification"
 
-    # If target is numeric and has many unique values, treat as regression
     if pd.api.types.is_numeric_dtype(y_non_null):
-        return "regression" if y_non_null.nunique() > 20 else "classification"
+        # More conservative threshold than the original version
+        return "regression" if y_non_null.nunique() > max(15, len(y_non_null) * 0.05) else "classification"
 
-    # Otherwise treat as classification
     return "classification"
 
 
-# Function to build preprocessing pipeline for features
-def build_preprocessor(X):
+def find_valid_targets(data: pd.DataFrame) -> List[str]:
+    """
+    Determine which columns are usable as target columns.
+
+    We exclude:
+    - unnamed/placeholder columns
+    - columns with very few non-null values
+    - columns with only one unique value
+    """
+    valid_targets = []
+
+    for col in data.columns:
+        col_lower = str(col).strip().lower()
+
+        if col_lower.startswith("unnamed"):
+            continue
+
+        if data[col].notna().sum() < 10:
+            continue
+
+        if data[col].nunique(dropna=True) <= 1:
+            continue
+
+        valid_targets.append(col)
+
+    return valid_targets
+
+
+# ============================================================
+# HELPER FUNCTIONS: FEATURE CLEANING / PREPROCESSING
+# ============================================================
+def convert_datetime_features(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Attempt to detect datetime-like columns and engineer useful parts.
+
+    Instead of dropping all datetime columns, we try to convert them into:
+    - year
+    - month
+    - day
+    - day of week
+
+    This gives the model a chance to learn from time information.
+    """
     X = X.copy()
 
-    # Drop columns with more than 50% missing values
-    X = X.loc[:, X.isnull().mean() < 0.5]
+    for col in X.columns:
+        if X[col].dtype == "object":
+            # Only attempt conversion when a reasonable share of rows parse as dates
+            parsed = pd.to_datetime(X[col], errors="coerce")
+            parse_ratio = parsed.notna().mean()
 
-    # Drop constant columns (columns with only one unique value)
-    nunique = X.nunique(dropna=False)
-    X = X.loc[:, nunique > 1]
+            if parse_ratio >= 0.7:
+                X[f"{col}_year"] = parsed.dt.year
+                X[f"{col}_month"] = parsed.dt.month
+                X[f"{col}_day"] = parsed.dt.day
+                X[f"{col}_dayofweek"] = parsed.dt.dayofweek
+                X = X.drop(columns=[col])
 
-    # Convert mixed-type columns into strings so encoding can handle them
+    return X
+
+
+def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
+    """
+    Remove problematic feature columns and track what was removed.
+
+    Removed columns include:
+    - high-missing-value columns (> 60%)
+    - constant columns
+    """
+    X = X.copy()
+    dropped_summary = {
+        "high_missing": [],
+        "constant": [],
+    }
+
+    # Drop columns with too many missing values
+    high_missing_cols = X.columns[X.isna().mean() > 0.60].tolist()
+    if high_missing_cols:
+        dropped_summary["high_missing"] = high_missing_cols
+        X = X.drop(columns=high_missing_cols)
+
+    # Drop constant columns
+    constant_cols = X.columns[X.nunique(dropna=False) <= 1].tolist()
+    if constant_cols:
+        dropped_summary["constant"] = constant_cols
+        X = X.drop(columns=constant_cols)
+
+    return X, dropped_summary
+
+
+def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert mixed-type columns to strings to avoid downstream transformer issues.
+    """
+    X = X.copy()
+
     for col in X.columns:
         try:
-            if X[col].apply(type).nunique() > 1:
+            # If a column contains a mixture of Python value types,
+            # cast it to string so OneHotEncoder can handle it safely.
+            if X[col].dropna().apply(type).nunique() > 1:
                 X[col] = X[col].astype(str)
         except Exception:
             X[col] = X[col].astype(str)
 
-    # Drop datetime columns because they are not directly handled here
-    datetime_cols = X.select_dtypes(include=["datetime64[ns]", "datetime64"]).columns.tolist()
-    if datetime_cols:
-        X = X.drop(columns=datetime_cols)
+    return X
 
-    # Separate numeric and categorical columns
+
+def build_preprocessor(X: pd.DataFrame):
+    """
+    Build a preprocessing pipeline for numeric and categorical columns.
+
+    Numeric:
+    - median imputation
+    - standard scaling
+
+    Categorical:
+    - most frequent imputation
+    - one-hot encoding
+    """
+    X = X.copy()
+
+    # Try to extract features from datetime-like columns
+    X = convert_datetime_features(X)
+
+    # Remove obviously problematic columns
+    X, dropped_summary = drop_problematic_columns(X)
+
+    # Standardize mixed-type columns so encoders behave consistently
+    X = standardize_mixed_columns(X)
+
+    # Identify numeric vs categorical features
     numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = [col for col in X.columns if col not in numeric_cols]
 
-    # Preprocessing steps for numeric columns:
-    # 1. Fill missing values with mean
-    # 2. Scale values
+    # Numeric pipeline
     numeric_transformer = Pipeline(
         steps=[
-            ("imputer", SimpleImputer(strategy="mean")),
+            ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
         ]
     )
 
-    # Preprocessing steps for categorical columns:
-    # 1. Fill missing values with most frequent value
-    # 2. Convert categories into numerical one-hot encoded format
+    # Categorical pipeline
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -206,7 +540,7 @@ def build_preprocessor(X):
         ]
     )
 
-    # Combine numeric and categorical preprocessing
+    # Combine both preprocessing branches
     preprocessor = ColumnTransformer(
         transformers=[
             ("num", numeric_transformer, numeric_cols),
@@ -215,235 +549,374 @@ def build_preprocessor(X):
         remainder="drop"
     )
 
-    return X, preprocessor, numeric_cols, categorical_cols
+    return X, preprocessor, numeric_cols, categorical_cols, dropped_summary
 
 
-# Function to return a dictionary of models depending on task type
-def get_models(task_type):
-    models = {}
-
+# ============================================================
+# HELPER FUNCTIONS: MODELS / PIPELINES / TUNING
+# ============================================================
+def get_models(task_type: str) -> Dict[str, object]:
+    """
+    Return candidate models based on the task type.
+    """
     if task_type == "classification":
-        # Classification models
         models = {
             "Logistic Regression": LogisticRegression(max_iter=10000),
-            "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
-            "SVM": SVC(),
+            "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42),
+            "SVM": SVC(probability=False),
             "KNN": KNeighborsClassifier(),
         }
 
-        # Add XGBoost classifier if available
         if XGBOOST_AVAILABLE:
             models["XGBoost"] = xgb.XGBClassifier(
                 eval_metric="logloss",
-                random_state=42
+                random_state=42,
+                n_estimators=200,
             )
 
-        # Add LightGBM classifier if available
         if LIGHTGBM_AVAILABLE:
-            models["LightGBM"] = lgb.LGBMClassifier(random_state=42)
+            models["LightGBM"] = lgb.LGBMClassifier(random_state=42, n_estimators=200)
 
     else:
-        # Regression models
         models = {
             "Linear Regression": LinearRegression(),
-            "Random Forest": RandomForestRegressor(n_estimators=100, random_state=42),
+            "Random Forest": RandomForestRegressor(n_estimators=200, random_state=42),
             "SVM": SVR(),
             "KNN": KNeighborsRegressor(),
         }
 
-        # Add XGBoost regressor if available
         if XGBOOST_AVAILABLE:
-            models["XGBoost"] = xgb.XGBRegressor(random_state=42)
+            models["XGBoost"] = xgb.XGBRegressor(random_state=42, n_estimators=200)
 
-        # Add LightGBM regressor if available
         if LIGHTGBM_AVAILABLE:
-            models["LightGBM"] = lgb.LGBMRegressor(random_state=42)
+            models["LightGBM"] = lgb.LGBMRegressor(random_state=42, n_estimators=200)
 
     return models
 
 
-# Function to combine preprocessing and model into one pipeline
-def build_pipeline(preprocessor, model):
+def build_pipeline(preprocessor, model) -> Pipeline:
+    """
+    Combine preprocessing and model into one reusable sklearn pipeline.
+    """
     return Pipeline(
         steps=[
             ("preprocessor", preprocessor),
-            ("model", model)
+            ("model", model),
         ]
     )
 
 
-# Function to run Grid Search hyperparameter tuning for supported models
-def run_grid_search(model_name, pipeline, X_train, y_train, task_type):
-    param_grid = {}
-
-    # Define tuning parameters depending on model
+def get_param_grid(model_name: str) -> Dict[str, List]:
+    """
+    Hyperparameter search spaces for supported models.
+    """
     if model_name == "Random Forest":
-        param_grid = {
-            "model__n_estimators": [50, 100],
-            "model__max_depth": [None, 5, 10]
+        return {
+            "model__n_estimators": [100, 200],
+            "model__max_depth": [None, 8, 16],
+            "model__min_samples_split": [2, 5],
         }
 
-    elif model_name == "XGBoost":
-        param_grid = {
-            "model__n_estimators": [50, 100],
-            "model__max_depth": [3, 6]
+    if model_name == "XGBoost":
+        return {
+            "model__n_estimators": [100, 200],
+            "model__max_depth": [3, 6],
+            "model__learning_rate": [0.05, 0.1],
         }
 
-    elif model_name == "LightGBM":
-        param_grid = {
-            "model__n_estimators": [50, 100],
-            "model__num_leaves": [31, 64]
+    if model_name == "LightGBM":
+        return {
+            "model__n_estimators": [100, 200],
+            "model__num_leaves": [31, 63],
+            "model__learning_rate": [0.05, 0.1],
         }
 
-    # If no parameter grid exists, return original pipeline unchanged
+    return {}
+
+
+def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str) -> Pipeline:
+    """
+    Run GridSearchCV on supported models.
+    If the model is not supported or tuning fails, return the original pipeline.
+    """
+    param_grid = get_param_grid(model_name)
+
     if not param_grid:
+        st.info(f"No tuning grid defined for {model_name}. Using default settings.")
         return pipeline
 
     try:
-        # Use accuracy for classification and negative MSE for regression
-        scoring = "accuracy" if task_type == "classification" else "neg_mean_squared_error"
+        scoring = "accuracy" if task_type == "classification" else "neg_root_mean_squared_error"
 
         grid = GridSearchCV(
-            pipeline,
+            estimator=pipeline,
             param_grid=param_grid,
             cv=3,
             scoring=scoring,
-            n_jobs=-1
+            n_jobs=-1,
         )
-
-        # Train grid search
         grid.fit(X_train, y_train)
 
-        # Show best parameters found
         st.success(f"Best parameters for {model_name}: {grid.best_params_}")
-
         return grid.best_estimator_
 
     except Exception as e:
-        # If tuning fails, continue with original pipeline
         st.warning(f"Grid search skipped for {model_name}: {e}")
         return pipeline
 
 
-# Function to evaluate all models using cross-validation
-def evaluate_models(X_train, y_train, models, preprocessor, task_type):
-    results = {}
+def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, task_type: str) -> pd.DataFrame:
+    """
+    Evaluate candidate models using cross-validation.
+
+    For classification:
+    - score = mean accuracy
+
+    For regression:
+    - score = mean RMSE
+      (lower is better)
+
+    Returns a DataFrame for easier sorting and display.
+    """
+    rows = []
 
     for name, model in models.items():
         try:
-            # Build full pipeline for each model
-            pipeline = build_pipeline(preprocessor, model)
+            pipeline = build_pipeline(preprocessor, clone(model))
 
-            # For classification: use accuracy
             if task_type == "classification":
-                score = cross_val_score(
-                    pipeline, X_train, y_train, cv=5, scoring="accuracy"
-                ).mean()
-
-            # For regression: use mean squared error
+                cv_scores = cross_val_score(
+                    pipeline,
+                    X_train,
+                    y_train,
+                    cv=5,
+                    scoring="accuracy",
+                    n_jobs=None,
+                )
+                rows.append({
+                    "Model": name,
+                    "CV Score": float(np.mean(cv_scores)),
+                    "Score Type": "Accuracy",
+                })
             else:
-                score = -cross_val_score(
-                    pipeline, X_train, y_train, cv=5, scoring="neg_mean_squared_error"
-                ).mean()
-
-            # Store average CV score
-            results[name] = score
+                cv_scores = cross_val_score(
+                    pipeline,
+                    X_train,
+                    y_train,
+                    cv=5,
+                    scoring="neg_root_mean_squared_error",
+                    n_jobs=None,
+                )
+                rows.append({
+                    "Model": name,
+                    "CV Score": float(-np.mean(cv_scores)),
+                    "Score Type": "RMSE",
+                })
 
         except Exception:
-            # Skip model if it fails
+            # Skip failing models rather than crashing the app
             continue
 
-    return results
+    results_df = pd.DataFrame(rows)
+
+    if not results_df.empty:
+        ascending = task_type == "regression"
+        results_df = results_df.sort_values("CV Score", ascending=ascending).reset_index(drop=True)
+
+    return results_df
 
 
-# Function to visualize model results as a bar chart
-def plot_results(results, task_type):
-    if not results:
+# ============================================================
+# HELPER FUNCTIONS: VISUALIZATION
+# ============================================================
+def plot_model_results(results_df: pd.DataFrame, task_type: str) -> None:
+    """
+    Display a clean single-plot bar chart comparing candidate models.
+    """
+    if results_df.empty:
         st.warning("No valid models could be evaluated.")
         return
 
-    names = list(results.keys())
-    scores = list(results.values())
-
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(names, scores)
-    ax.set_title("Model Performance")
-    ax.set_ylabel("Accuracy" if task_type == "classification" else "CV MSE")
-    plt.xticks(rotation=30, ha="right")
+
+    ax.bar(results_df["Model"], results_df["CV Score"])
+    ax.set_title("Model Comparison", fontsize=14)
+    ax.set_xlabel("Model")
+    ax.set_ylabel("CV Accuracy" if task_type == "classification" else "CV RMSE")
+    plt.xticks(rotation=25, ha="right")
     plt.tight_layout()
 
-    # Display chart in Streamlit
     st.pyplot(fig)
 
 
-# Main application function
-def main():
-    # App title and short instruction
-    st.title("📊 Free AutoML Tool")
-    st.write(
-        "Upload a dataset, choose your target column, and let the app compare machine learning models for you."
+def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
+    """
+    Plot a simple target distribution to help users understand the modeling target.
+    """
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    if task_type == "classification":
+        value_counts = y_raw.astype(str).value_counts().head(15)
+        ax.bar(value_counts.index.astype(str), value_counts.values)
+        ax.set_title("Target Class Distribution")
+        ax.set_xlabel("Class")
+        ax.set_ylabel("Count")
+        plt.xticks(rotation=25, ha="right")
+    else:
+        numeric_target = pd.to_numeric(y_raw, errors="coerce").dropna()
+        ax.hist(numeric_target, bins=25)
+        ax.set_title("Target Distribution")
+        ax.set_xlabel("Target Value")
+        ax.set_ylabel("Frequency")
+
+    plt.tight_layout()
+    st.pyplot(fig)
+
+
+# ============================================================
+# HELPER FUNCTIONS: TRAIN/TEST SAFETY
+# ============================================================
+def safe_train_test_split(X, y, task_type: str):
+    """
+    Split data into train/test safely.
+
+    For classification, stratification is helpful, but it can fail when:
+    - one or more classes have too few examples
+
+    This function falls back gracefully when needed.
+    """
+    if task_type == "classification":
+        try:
+            # Use stratification only if every class has at least 2 samples
+            y_series = pd.Series(y)
+            min_class_count = y_series.value_counts().min()
+
+            if min_class_count >= 2:
+                return train_test_split(
+                    X, y,
+                    test_size=0.2,
+                    random_state=42,
+                    stratify=y
+                )
+
+        except Exception:
+            pass
+
+    # Fallback split without stratification
+    return train_test_split(
+        X, y,
+        test_size=0.2,
+        random_state=42
     )
 
-    # Expandable instructions section
-    with st.expander("How it works"):
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+def main():
+    # -----------------------------
+    # Header / Hero section
+    # -----------------------------
+    st.markdown(
+        """
+        <div class="hero-card">
+            <h1 style="margin-bottom:0.3rem;">AutoML Model Selection Tool</h1>
+            <p style="margin-bottom:0.4rem; font-size:1.04rem;">
+                Upload a dataset, select your target, compare strong baseline models,
+                and export the best trained pipeline.
+            </p>
+            <p class="tiny-note" style="margin-bottom:0;">
+                Designed for a clean public demo experience while still handling messy real-world data.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # -----------------------------
+    # Sidebar controls / app info
+    # -----------------------------
+    st.sidebar.title("Workflow")
+    st.sidebar.write("1. Upload data")
+    st.sidebar.write("2. Choose target and features")
+    st.sidebar.write("3. Run model comparison")
+    st.sidebar.write("4. Review results and download the best pipeline")
+
+    with st.sidebar.expander("Supported file types", expanded=False):
+        st.write("CSV, XLSX, JSON")
+
+    with st.sidebar.expander("What this app does", expanded=False):
         st.write(
             """
-            - Upload a CSV, XLSX, or JSON file
-            - Choose the target column
-            - Select which features to use
-            - Pick classification or regression
-            - Run AutoML and compare models
-            - Download the best trained pipeline
+            - Cleans messy headers
+            - Handles missing values
+            - Encodes categorical columns
+            - Compares several ML models
+            - Evaluates the best model
+            - Exports the trained pipeline
             """
         )
 
-    # Upload widget
+    # -----------------------------
+    # File upload
+    # -----------------------------
     uploaded_file = st.file_uploader(
         "Upload your dataset",
         type=["csv", "xlsx", "json"]
     )
 
-    # Stop if no file is uploaded
+    # Stop here until a file is provided
     if not uploaded_file:
+        st.info("Upload a dataset to begin.")
         return
 
-    # Load and clean dataset
+    # -----------------------------
+    # Load data
+    # -----------------------------
     data = load_and_clean_data(uploaded_file)
 
-    # Stop if data failed to load
     if data is None or data.empty:
         st.error("The uploaded file could not be processed.")
         return
 
-    # Show preview of dataset
-    st.subheader("Dataset Preview")
-    st.dataframe(data.head(), use_container_width=True)
+    # -----------------------------
+    # Dataset profile section
+    # -----------------------------
+    profile = get_dataset_profile(data)
 
-    # Identify valid columns that can serve as target columns
-    valid_targets = [
-        col for col in data.columns
-        if not str(col).lower().startswith("unnamed")
-        and data[col].notnull().sum() > 10
-        and data[col].nunique(dropna=True) > 1
-    ]
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Dataset Overview")
 
-    # Stop if no target column is suitable
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Rows", f"{profile['rows']:,}")
+    m2.metric("Columns", f"{profile['columns']:,}")
+    m3.metric("Missing %", f"{profile['missing_pct']}%")
+    m4.metric("Duplicate Rows", f"{profile['duplicate_rows']:,}")
+    m5.metric("Numeric / Categorical", f"{profile['numeric_cols']} / {profile['categorical_cols']}")
+
+    st.write("Preview")
+    st.dataframe(data.head(10), use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # -----------------------------
+    # Target selection
+    # -----------------------------
+    valid_targets = find_valid_targets(data)
+
     if not valid_targets:
         st.error("No usable target columns were found.")
         return
 
-    # Create two side-by-side input columns
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Model Setup")
+
     col1, col2 = st.columns(2)
 
     with col1:
-        # Let user select the target column
         target_column = st.selectbox("Select target column", valid_targets)
 
     with col2:
-        # Automatically suggest classification or regression
         detected_task = auto_detect_task(data[target_column])
-
-        # Let user confirm or change problem type
         task_type = st.radio(
             "Problem type",
             ["classification", "regression"],
@@ -451,99 +924,123 @@ def main():
             horizontal=True
         )
 
-    # Feature columns = everything except target
     available_features = [col for col in data.columns if col != target_column]
 
-    # Let user choose which feature columns to use
+    # Default to using all available features to make the demo feel more complete.
+    # Users can still manually remove columns.
     selected_features = st.multiselect(
-        "Select features",
+        "Select feature columns",
         available_features,
-        default=available_features[: min(8, len(available_features))]
+        default=available_features
     )
 
-    # Optional checkbox for hyperparameter tuning
     tune_model = st.checkbox("Tune supported models with Grid Search", value=False)
 
-    # Stop if no feature selected
     if not selected_features:
         st.warning("Please select at least one feature.")
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Run AutoML when button is clicked
+    # Optional target visualization
+    with st.expander("Inspect target distribution", expanded=False):
+        plot_target_distribution(data[target_column], task_type)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # -----------------------------
+    # Run AutoML
+    # -----------------------------
     if st.button("Run AutoML", type="primary"):
-        with st.spinner("Preparing data and evaluating models..."):
+        with st.spinner("Preparing data, comparing models, and training the best pipeline..."):
             # Keep only selected features and target
             df_model = data[selected_features + [target_column]].copy()
 
-            # Separate input features (X) and target (y)
+            # Remove duplicate rows for a slightly cleaner training set
+            df_model = df_model.drop_duplicates().reset_index(drop=True)
+
+            # Split features and target
             X = df_model.drop(columns=[target_column])
             y_raw = df_model[target_column]
 
-            # Drop rows where target is missing
+            # Remove rows where target is missing
             valid_idx = y_raw.dropna().index
             X = X.loc[valid_idx].copy()
             y_raw = y_raw.loc[valid_idx].copy()
 
-            # For regression, convert target to numeric
+            # Stop if too little data remains
+            if len(X) < 20:
+                st.error("Not enough usable rows remain after cleaning. Please upload a larger dataset.")
+                return
+
+            # Prepare target based on problem type
+            label_encoder = None
+
             if task_type == "regression":
                 y = pd.to_numeric(y_raw, errors="coerce")
                 valid_idx = y.dropna().index
                 X = X.loc[valid_idx].copy()
                 y = y.loc[valid_idx].copy()
 
-                # Stop if no valid regression target remains
                 if y.empty:
-                    st.error("Target column could not be used for regression.")
+                    st.error("The selected target could not be used for regression.")
                     return
 
             else:
-                # For classification, convert target labels into encoded numbers
                 y = y_raw.astype(str)
                 label_encoder = LabelEncoder()
                 y = label_encoder.fit_transform(y)
 
-            # Build cleaned feature set and preprocessing pipeline
-            X, preprocessor, numeric_cols, categorical_cols = build_preprocessor(X)
+            # Build preprocessor
+            X, preprocessor, numeric_cols, categorical_cols, dropped_summary = build_preprocessor(X)
 
-            # Stop if no valid features remain
             if X.empty or len(X.columns) == 0:
                 st.error("No valid feature columns remained after cleaning.")
                 return
 
-            # Stratify only for classification
-            stratify_y = y if task_type == "classification" else None
-
-            # Split dataset into training and testing sets
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42, stratify=stratify_y
+            # Show cleaning summary
+            st.subheader("Feature Preparation Summary")
+            prep_col1, prep_col2, prep_col3, prep_col4 = st.columns(4)
+            prep_col1.metric("Features Used", len(X.columns))
+            prep_col2.metric("Numeric Features", len(numeric_cols))
+            prep_col3.metric("Categorical Features", len(categorical_cols))
+            prep_col4.metric(
+                "Dropped Columns",
+                len(dropped_summary["high_missing"]) + len(dropped_summary["constant"])
             )
 
-            # Load model options
+            with st.expander("See dropped columns", expanded=False):
+                st.write("Dropped for high missingness (> 60%):", dropped_summary["high_missing"] or "None")
+                st.write("Dropped for being constant:", dropped_summary["constant"] or "None")
+
+            # Train/test split
+            X_train, X_test, y_train, y_test = safe_train_test_split(X, y, task_type)
+
+            # Candidate models
             models = get_models(task_type)
 
-            # Evaluate all models
-            results = evaluate_models(X_train, y_train, models, preprocessor, task_type)
+            # Cross-validated model comparison
+            results_df = evaluate_models(X_train, y_train, models, preprocessor, task_type)
 
-            # Stop if all models fail
-            if not results:
+            if results_df.empty:
                 st.error("All models failed during evaluation.")
                 return
 
-            # Show model comparison results
             st.subheader("Model Comparison")
-            st.write(results)
-            plot_results(results, task_type)
+            st.dataframe(results_df, use_container_width=True)
+            plot_model_results(results_df, task_type)
 
-            # Pick the best model
-            # For classification: highest accuracy is best
-            # For regression: lowest MSE is best
-            best_model_name = max(results, key=results.get) if task_type == "classification" else min(results, key=results.get)
-            st.success(f"Best model: {best_model_name}")
+            # Select best model
+            if task_type == "classification":
+                best_model_name = results_df.iloc[0]["Model"]  # highest accuracy because sorted descending
+            else:
+                best_model_name = results_df.iloc[0]["Model"]  # lowest RMSE because sorted ascending
 
-            # Build pipeline with best model
-            best_pipeline = build_pipeline(preprocessor, models[best_model_name])
+            st.success(f"Best model selected: {best_model_name}")
 
-            # Optionally tune best model
+            # Build best pipeline
+            best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
+
+            # Optional hyperparameter tuning
             if tune_model:
                 best_pipeline = run_grid_search(
                     best_model_name,
@@ -553,63 +1050,71 @@ def main():
                     task_type
                 )
 
-            # Train best pipeline on training data
+            # Fit final model
             best_pipeline.fit(X_train, y_train)
 
-            # Make predictions on test set
+            # Predict on holdout test data
             y_pred = best_pipeline.predict(X_test)
 
-            # Show test set metrics
-            st.subheader("Test Metrics")
+            # -----------------------------
+            # Test metrics
+            # -----------------------------
+            st.subheader("Holdout Test Performance")
 
             if task_type == "classification":
-                # Classification performance metrics
                 acc = accuracy_score(y_test, y_pred)
                 prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
                 rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
                 f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
 
-                # Display metrics in columns
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Accuracy", f"{acc:.3f}")
-                c2.metric("Precision", f"{prec:.3f}")
-                c3.metric("Recall", f"{rec:.3f}")
-                c4.metric("F1 Score", f"{f1:.3f}")
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("Accuracy", f"{acc:.3f}")
+                mc2.metric("Precision", f"{prec:.3f}")
+                mc3.metric("Recall", f"{rec:.3f}")
+                mc4.metric("F1 Score", f"{f1:.3f}")
 
-                # Show confusion matrix
                 st.write("Confusion Matrix")
-                st.dataframe(pd.DataFrame(confusion_matrix(y_test, y_pred)))
+                cm = confusion_matrix(y_test, y_pred)
+                st.dataframe(pd.DataFrame(cm), use_container_width=True)
+
+                # Optional class label reference
+                if label_encoder is not None:
+                    with st.expander("Encoded class labels", expanded=False):
+                        st.write(pd.DataFrame({
+                            "Encoded Value": range(len(label_encoder.classes_)),
+                            "Original Label": label_encoder.classes_
+                        }))
 
             else:
-                # Regression performance metrics
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
                 mae = mean_absolute_error(y_test, y_pred)
                 r2 = r2_score(y_test, y_pred)
 
-                # Display metrics in columns
-                c1, c2, c3 = st.columns(3)
-                c1.metric("RMSE", f"{rmse:.3f}")
-                c2.metric("MAE", f"{mae:.3f}")
-                c3.metric("R²", f"{r2:.3f}")
+                mr1, mr2, mr3 = st.columns(3)
+                mr1.metric("RMSE", f"{rmse:.3f}")
+                mr2.metric("MAE", f"{mae:.3f}")
+                mr3.metric("R²", f"{r2:.3f}")
 
-            # Save trained pipeline and useful metadata
+            # -----------------------------
+            # Export pipeline
+            # -----------------------------
             artifact = {
                 "pipeline": best_pipeline,
                 "task_type": task_type,
                 "target_column": target_column,
                 "selected_features": selected_features,
+                "numeric_features_after_cleaning": numeric_cols,
+                "categorical_features_after_cleaning": categorical_cols,
+                "dropped_columns_summary": dropped_summary,
             }
 
-            # Also save label encoder for classification problems
-            if task_type == "classification":
+            if task_type == "classification" and label_encoder is not None:
                 artifact["label_encoder"] = label_encoder
 
-            # Save artifact into memory buffer for download
             buffer = io.BytesIO()
             joblib.dump(artifact, buffer)
             buffer.seek(0)
 
-            # Download button for trained model
             st.download_button(
                 "Download Trained Pipeline",
                 data=buffer,
@@ -617,8 +1122,14 @@ def main():
                 mime="application/octet-stream"
             )
 
+            st.success("Done. Your best model has been trained and packaged for download.")
 
-# Run the app
+
+# ============================================================
+# APP ENTRY POINT
+# ============================================================
 if __name__ == "__main__":
     main()
-#Run in terminal: streamlit run automated_ml_tool.py
+
+# Run locally with:
+# streamlit run automated_ml_tool.py
