@@ -81,7 +81,7 @@ except Exception:
 # ============================================================
 st.set_page_config(
     page_title="AutoML Model Selection Tool",
-    page_icon="📈",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -331,10 +331,12 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
         # Remove fully empty rows and columns
         data = data.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
 
-        # Try to convert numeric-looking columns where possible
+        # Light first-pass conversion for numeric-looking columns
+        # This stays conservative and avoids expensive operations.
         for col in data.columns:
             if data[col].dtype == "object":
-                converted = pd.to_numeric(data[col], errors="ignore")
+                stripped = data[col].astype(str).str.strip()
+                converted = pd.to_numeric(stripped, errors="ignore")
                 data[col] = converted
 
         return data
@@ -383,7 +385,6 @@ def auto_detect_task(y_series: pd.Series) -> str:
         return "classification"
 
     if pd.api.types.is_numeric_dtype(y_non_null):
-        # More conservative threshold than the original version
         return "regression" if y_non_null.nunique() > max(15, len(y_non_null) * 0.05) else "classification"
 
     return "classification"
@@ -436,7 +437,6 @@ def convert_datetime_features(X: pd.DataFrame) -> pd.DataFrame:
 
     for col in X.columns:
         if X[col].dtype == "object":
-            # Only attempt conversion when a reasonable share of rows parse as dates
             parsed = pd.to_datetime(X[col], errors="coerce")
             parse_ratio = parsed.notna().mean()
 
@@ -464,13 +464,11 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
         "constant": [],
     }
 
-    # Drop columns with too many missing values
     high_missing_cols = X.columns[X.isna().mean() > 0.60].tolist()
     if high_missing_cols:
         dropped_summary["high_missing"] = high_missing_cols
         X = X.drop(columns=high_missing_cols)
 
-    # Drop constant columns
     constant_cols = X.columns[X.nunique(dropna=False) <= 1].tolist()
     if constant_cols:
         dropped_summary["constant"] = constant_cols
@@ -487,14 +485,96 @@ def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
 
     for col in X.columns:
         try:
-            # If a column contains a mixture of Python value types,
-            # cast it to string so OneHotEncoder can handle it safely.
             if X[col].dropna().apply(type).nunique() > 1:
                 X[col] = X[col].astype(str)
         except Exception:
             X[col] = X[col].astype(str)
 
     return X
+
+
+def clean_numeric_like_series(series: pd.Series) -> pd.Series:
+    """
+    Clean a potentially numeric text column before conversion.
+
+    Handles common patterns like:
+    - commas: 1,200
+    - currency: $1200
+    - percentages: 45%
+    - extra spaces
+
+    This function is intentionally lightweight to avoid slowing the app.
+    """
+    cleaned = (
+        series.astype(str)
+        .str.strip()
+        .replace(
+            {
+                "": np.nan,
+                "nan": np.nan,
+                "None": np.nan,
+                "none": np.nan,
+                "null": np.nan,
+            }
+        )
+        .str.replace(",", "", regex=False)
+        .str.replace("$", "", regex=False)
+        .str.replace("%", "", regex=False)
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.85):
+    """
+    Infer numeric vs categorical columns more intelligently.
+
+    Why this is needed:
+    Some datasets store numbers as text, for example:
+    - "1000"
+    - "$2,500"
+    - "45%"
+
+    Logic:
+    - keep already-numeric columns as numeric
+    - for object columns, attempt numeric conversion
+    - if enough non-null values convert successfully, treat as numeric
+    - otherwise keep as categorical
+
+    The threshold is set conservatively to avoid misclassifying
+    genuinely categorical columns.
+    """
+    X = X.copy()
+    numeric_cols = []
+    categorical_cols = []
+
+    for col in X.columns:
+        series = X[col]
+
+        if pd.api.types.is_numeric_dtype(series):
+            numeric_cols.append(col)
+            continue
+
+        if series.dtype == "object":
+            numeric_candidate = clean_numeric_like_series(series)
+
+            non_null_original = series.notna().sum()
+
+            # If there are no non-null values, keep as categorical
+            if non_null_original == 0:
+                categorical_cols.append(col)
+                continue
+
+            converted_ratio = numeric_candidate.notna().sum() / non_null_original
+
+            if converted_ratio >= numeric_threshold:
+                X[col] = numeric_candidate
+                numeric_cols.append(col)
+            else:
+                categorical_cols.append(col)
+        else:
+            categorical_cols.append(col)
+
+    return X, numeric_cols, categorical_cols
 
 
 def build_preprocessor(X: pd.DataFrame):
@@ -508,6 +588,9 @@ def build_preprocessor(X: pd.DataFrame):
     Categorical:
     - most frequent imputation
     - one-hot encoding
+
+    This version uses smarter feature-type inference so numeric-looking
+    text columns are not incorrectly forced into categorical encoding.
     """
     X = X.copy()
 
@@ -520,11 +603,9 @@ def build_preprocessor(X: pd.DataFrame):
     # Standardize mixed-type columns so encoders behave consistently
     X = standardize_mixed_columns(X)
 
-    # Identify numeric vs categorical features
-    numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = [col for col in X.columns if col not in numeric_cols]
+    # Smarter numeric/categorical detection
+    X, numeric_cols, categorical_cols = infer_feature_types(X)
 
-    # Numeric pipeline
     numeric_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -532,7 +613,6 @@ def build_preprocessor(X: pd.DataFrame):
         ]
     )
 
-    # Categorical pipeline
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -540,7 +620,6 @@ def build_preprocessor(X: pd.DataFrame):
         ]
     )
 
-    # Combine both preprocessing branches
     preprocessor = ColumnTransformer(
         transformers=[
             ("num", numeric_transformer, numeric_cols),
@@ -714,7 +793,6 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                 })
 
         except Exception:
-            # Skip failing models rather than crashing the app
             continue
 
     results_df = pd.DataFrame(rows)
@@ -787,7 +865,6 @@ def safe_train_test_split(X, y, task_type: str):
     """
     if task_type == "classification":
         try:
-            # Use stratification only if every class has at least 2 samples
             y_series = pd.Series(y)
             min_class_count = y_series.value_counts().min()
 
@@ -802,7 +879,6 @@ def safe_train_test_split(X, y, task_type: str):
         except Exception:
             pass
 
-    # Fallback split without stratification
     return train_test_split(
         X, y,
         test_size=0.2,
@@ -814,9 +890,6 @@ def safe_train_test_split(X, y, task_type: str):
 # MAIN APPLICATION
 # ============================================================
 def main():
-    # -----------------------------
-    # Header / Hero section
-    # -----------------------------
     st.markdown(
         """
         <div class="hero-card">
@@ -833,9 +906,6 @@ def main():
         unsafe_allow_html=True
     )
 
-    # -----------------------------
-    # Sidebar controls / app info
-    # -----------------------------
     st.sidebar.title("Workflow")
     st.sidebar.write("1. Upload data")
     st.sidebar.write("2. Choose target and features")
@@ -850,6 +920,7 @@ def main():
             """
             - Cleans messy headers
             - Handles missing values
+            - Detects numeric-like text columns
             - Encodes categorical columns
             - Compares several ML models
             - Evaluates the best model
@@ -857,31 +928,21 @@ def main():
             """
         )
 
-    # -----------------------------
-    # File upload
-    # -----------------------------
     uploaded_file = st.file_uploader(
         "Upload your dataset",
         type=["csv", "xlsx", "json"]
     )
 
-    # Stop here until a file is provided
     if not uploaded_file:
         st.info("Upload a dataset to begin.")
         return
 
-    # -----------------------------
-    # Load data
-    # -----------------------------
     data = load_and_clean_data(uploaded_file)
 
     if data is None or data.empty:
         st.error("The uploaded file could not be processed.")
         return
 
-    # -----------------------------
-    # Dataset profile section
-    # -----------------------------
     profile = get_dataset_profile(data)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -898,9 +959,6 @@ def main():
     st.dataframe(data.head(10), use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # -----------------------------
-    # Target selection
-    # -----------------------------
     valid_targets = find_valid_targets(data)
 
     if not valid_targets:
@@ -926,8 +984,6 @@ def main():
 
     available_features = [col for col in data.columns if col != target_column]
 
-    # Default to using all available features to make the demo feel more complete.
-    # Users can still manually remove columns.
     selected_features = st.multiselect(
         "Select feature columns",
         available_features,
@@ -941,38 +997,27 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Optional target visualization
     with st.expander("Inspect target distribution", expanded=False):
         plot_target_distribution(data[target_column], task_type)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # -----------------------------
-    # Run AutoML
-    # -----------------------------
     if st.button("Run AutoML", type="primary"):
         with st.spinner("Preparing data, comparing models, and training the best pipeline..."):
-            # Keep only selected features and target
             df_model = data[selected_features + [target_column]].copy()
-
-            # Remove duplicate rows for a slightly cleaner training set
             df_model = df_model.drop_duplicates().reset_index(drop=True)
 
-            # Split features and target
             X = df_model.drop(columns=[target_column])
             y_raw = df_model[target_column]
 
-            # Remove rows where target is missing
             valid_idx = y_raw.dropna().index
             X = X.loc[valid_idx].copy()
             y_raw = y_raw.loc[valid_idx].copy()
 
-            # Stop if too little data remains
             if len(X) < 20:
                 st.error("Not enough usable rows remain after cleaning. Please upload a larger dataset.")
                 return
 
-            # Prepare target based on problem type
             label_encoder = None
 
             if task_type == "regression":
@@ -990,14 +1035,12 @@ def main():
                 label_encoder = LabelEncoder()
                 y = label_encoder.fit_transform(y)
 
-            # Build preprocessor
             X, preprocessor, numeric_cols, categorical_cols, dropped_summary = build_preprocessor(X)
 
             if X.empty or len(X.columns) == 0:
                 st.error("No valid feature columns remained after cleaning.")
                 return
 
-            # Show cleaning summary
             st.subheader("Feature Preparation Summary")
             prep_col1, prep_col2, prep_col3, prep_col4 = st.columns(4)
             prep_col1.metric("Features Used", len(X.columns))
@@ -1008,17 +1051,17 @@ def main():
                 len(dropped_summary["high_missing"]) + len(dropped_summary["constant"])
             )
 
+            with st.expander("See detected feature types", expanded=False):
+                st.write("Numeric columns:", numeric_cols if numeric_cols else "None")
+                st.write("Categorical columns:", categorical_cols if categorical_cols else "None")
+
             with st.expander("See dropped columns", expanded=False):
                 st.write("Dropped for high missingness (> 60%):", dropped_summary["high_missing"] or "None")
                 st.write("Dropped for being constant:", dropped_summary["constant"] or "None")
 
-            # Train/test split
             X_train, X_test, y_train, y_test = safe_train_test_split(X, y, task_type)
 
-            # Candidate models
             models = get_models(task_type)
-
-            # Cross-validated model comparison
             results_df = evaluate_models(X_train, y_train, models, preprocessor, task_type)
 
             if results_df.empty:
@@ -1029,18 +1072,15 @@ def main():
             st.dataframe(results_df, use_container_width=True)
             plot_model_results(results_df, task_type)
 
-            # Select best model
             if task_type == "classification":
-                best_model_name = results_df.iloc[0]["Model"]  # highest accuracy because sorted descending
+                best_model_name = results_df.iloc[0]["Model"]
             else:
-                best_model_name = results_df.iloc[0]["Model"]  # lowest RMSE because sorted ascending
+                best_model_name = results_df.iloc[0]["Model"]
 
             st.success(f"Best model selected: {best_model_name}")
 
-            # Build best pipeline
             best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
 
-            # Optional hyperparameter tuning
             if tune_model:
                 best_pipeline = run_grid_search(
                     best_model_name,
@@ -1050,15 +1090,9 @@ def main():
                     task_type
                 )
 
-            # Fit final model
             best_pipeline.fit(X_train, y_train)
-
-            # Predict on holdout test data
             y_pred = best_pipeline.predict(X_test)
 
-            # -----------------------------
-            # Test metrics
-            # -----------------------------
             st.subheader("Holdout Test Performance")
 
             if task_type == "classification":
@@ -1077,7 +1111,6 @@ def main():
                 cm = confusion_matrix(y_test, y_pred)
                 st.dataframe(pd.DataFrame(cm), use_container_width=True)
 
-                # Optional class label reference
                 if label_encoder is not None:
                     with st.expander("Encoded class labels", expanded=False):
                         st.write(pd.DataFrame({
@@ -1095,9 +1128,6 @@ def main():
                 mr2.metric("MAE", f"{mae:.3f}")
                 mr3.metric("R²", f"{r2:.3f}")
 
-            # -----------------------------
-            # Export pipeline
-            # -----------------------------
             artifact = {
                 "pipeline": best_pipeline,
                 "task_type": task_type,
@@ -1130,6 +1160,4 @@ def main():
 # ============================================================
 if __name__ == "__main__":
     main()
-
-# Run locally with:
 # streamlit run automated_ml_tool.py
