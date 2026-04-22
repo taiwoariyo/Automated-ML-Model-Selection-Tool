@@ -418,27 +418,39 @@ def clean_numeric_like_series(series: pd.Series) -> pd.Series:
     """
     Clean a potentially numeric text column before conversion.
 
-    Handles common patterns like:
+    Handles:
     - commas: 1,200
     - currency: $1200
     - percentages: 45%
-    - negative numbers in parentheses: (500)
-    - extra spaces
+    - negatives in parentheses: (500)
+    - spaces
+    - common null tokens
     """
-    cleaned = series.astype(str).str.strip()
+    cleaned = series.copy()
+
+    # Convert to string only for cleaning
+    cleaned = cleaned.astype(str).str.strip()
+
+    # Standard missing markers
     cleaned = cleaned.replace(
         {
             "": np.nan,
             "nan": np.nan,
+            "NaN": np.nan,
             "None": np.nan,
             "none": np.nan,
             "null": np.nan,
-            "NaN": np.nan,
+            "NULL": np.nan,
+            "N/A": np.nan,
+            "n/a": np.nan,
+            "NA": np.nan,
         }
     )
 
-    # Handle accounting-style negatives like (1234)
-    cleaned = cleaned.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    # Convert accounting negatives like (123) -> -123
+    cleaned = cleaned.str.replace(r"^\((.+)\)$", r"-\1", regex=True)
+
+    # Remove common formatting symbols
     cleaned = cleaned.str.replace(",", "", regex=False)
     cleaned = cleaned.str.replace("$", "", regex=False)
     cleaned = cleaned.str.replace("%", "", regex=False)
@@ -446,30 +458,26 @@ def clean_numeric_like_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-
 def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     """
     Return a compact dataset quality profile for display.
-
-    This uses the improved feature-type inference instead of raw pandas dtypes,
-    so numeric-looking text columns are counted correctly.
+    Uses inferred feature types instead of raw pandas dtypes.
     """
     total_cells = data.shape[0] * data.shape[1] if not data.empty else 0
     missing_cells = int(data.isna().sum().sum()) if total_cells > 0 else 0
     duplicate_rows = int(data.duplicated().sum()) if not data.empty else 0
 
-    profiled_data, numeric_cols, categorical_cols = infer_feature_types(data.copy())
+    _, numeric_cols, categorical_cols = infer_feature_types(data.copy())
 
     return {
-        "rows": int(profiled_data.shape[0]),
-        "columns": int(profiled_data.shape[1]),
+        "rows": int(data.shape[0]),
+        "columns": int(data.shape[1]),
         "missing_cells": missing_cells,
         "missing_pct": round((missing_cells / total_cells) * 100, 2) if total_cells > 0 else 0.0,
         "duplicate_rows": duplicate_rows,
         "numeric_cols": len(numeric_cols),
         "categorical_cols": len(categorical_cols),
     }
-
 
 
 def infer_target_type(y_series: pd.Series, unique_ratio_threshold: float = 0.05) -> str:
@@ -511,14 +519,24 @@ def infer_target_type(y_series: pd.Series, unique_ratio_threshold: float = 0.05)
 def auto_detect_task(y_series: pd.Series) -> str:
     """
     Automatically infer whether the task is classification or regression.
-
-    Improved version:
-    - recognizes numeric targets stored as text
-    - avoids misclassifying low-cardinality numeric targets as regression
     """
-    target_type = infer_target_type(y_series)
-    return "regression" if target_type == "numerical" else "classification"
+    y_non_null = y_series.dropna()
 
+    if y_non_null.empty:
+        return "classification"
+
+    # If already numeric
+    if pd.api.types.is_numeric_dtype(y_non_null):
+        return "regression" if y_non_null.nunique() > max(15, len(y_non_null) * 0.05) else "classification"
+
+    # Try coercing numeric-like text targets
+    numeric_candidate = clean_numeric_like_series(y_non_null)
+    conversion_ratio = numeric_candidate.notna().mean()
+
+    if conversion_ratio >= 0.80:
+        return "regression" if numeric_candidate.nunique() > max(15, len(numeric_candidate.dropna()) * 0.05) else "classification"
+
+    return "classification"
 
 
 def find_valid_targets(data: pd.DataFrame) -> List[str]:
@@ -604,33 +622,37 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
 
 def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert mixed-type columns to strings to avoid downstream transformer issues.
+    Standardize problematic mixed-type columns without destroying numeric information.
+
+    Important:
+    We do NOT blindly convert everything mixed to string anymore,
+    because that can hide numeric columns imported from Excel.
     """
     X = X.copy()
 
     for col in X.columns:
-        try:
-            if X[col].dropna().apply(type).nunique() > 1:
-                X[col] = X[col].astype(str)
-        except Exception:
-            X[col] = X[col].astype(str)
+        # Strip whitespace in object columns only
+        if X[col].dtype == "object":
+            X[col] = X[col].astype(str).str.strip()
+            X.loc[X[col].str.lower().isin(["", "nan", "none", "null", "n/a"]), col] = np.nan
 
     return X
 
 
 
-def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.85):
+def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.70):
     """
-    Infer numeric vs categorical columns more intelligently.
-
-    This fixes the second major issue in the original app.
+    Infer numeric vs categorical columns more reliably.
 
     Logic:
-    - keep already-numeric columns as numeric
-    - keep boolean columns as categorical
-    - for object columns, attempt numeric conversion
-    - only classify as numeric when a strong share of non-null values converts
-    - protect low-cardinality code-like columns from being incorrectly treated as continuous
+    - already numeric => numeric
+    - booleans => categorical
+    - object columns:
+        * try numeric coercion
+        * if most non-null values convert, treat as numeric
+        * otherwise categorical
+
+    This version is intentionally more practical for messy Excel data.
     """
     X = X.copy()
     numeric_cols = []
@@ -639,42 +661,37 @@ def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.85):
     for col in X.columns:
         series = X[col]
 
-        # Booleans are generally better handled as categorical.
+        # Boolean columns are usually better treated as categorical
         if pd.api.types.is_bool_dtype(series):
             X[col] = series.astype(str)
             categorical_cols.append(col)
             continue
 
-        # Native numeric columns stay numeric.
+        # Already numeric
         if pd.api.types.is_numeric_dtype(series):
             numeric_cols.append(col)
             continue
 
-        # Object/text columns get deeper inspection.
-        if series.dtype == "object":
-            # Columns with very low cardinality are usually categories, even when numeric-looking.
-            non_null = series.dropna()
-            unique_count = non_null.nunique()
-            unique_ratio = unique_count / max(len(non_null), 1) if len(non_null) > 0 else 0
+        # Datetime should not be treated as categorical here
+        if pd.api.types.is_datetime64_any_dtype(series):
+            numeric_cols.append(col)
+            continue
 
-            numeric_candidate = clean_numeric_like_series(series)
-            non_null_original = series.notna().sum()
+        # Object / mixed columns
+        numeric_candidate = clean_numeric_like_series(series)
+        non_null_original = series.notna().sum()
+        non_null_converted = numeric_candidate.notna().sum()
 
-            if non_null_original == 0:
-                categorical_cols.append(col)
-                continue
+        if non_null_original == 0:
+            categorical_cols.append(col)
+            continue
 
-            converted_ratio = numeric_candidate.notna().sum() / non_null_original
+        converted_ratio = non_null_converted / non_null_original
 
-            # Protect ID/code-like columns from being forced into numeric.
-            looks_like_category_code = (unique_count <= 12 and unique_ratio <= 0.20)
-
-            if converted_ratio >= numeric_threshold and not looks_like_category_code:
-                X[col] = numeric_candidate
-                numeric_cols.append(col)
-            else:
-                X[col] = series.astype(str)
-                categorical_cols.append(col)
+        # If most non-null values can be converted, it is numeric
+        if converted_ratio >= numeric_threshold:
+            X[col] = numeric_candidate
+            numeric_cols.append(col)
         else:
             X[col] = series.astype(str)
             categorical_cols.append(col)
