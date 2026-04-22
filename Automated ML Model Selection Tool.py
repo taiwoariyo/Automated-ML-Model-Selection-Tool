@@ -81,7 +81,7 @@ except Exception:
 # ============================================================
 st.set_page_config(
     page_title="AutoML Model Selection Tool",
-    page_icon="",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -119,11 +119,6 @@ st.markdown(
         .tiny-note {
             color: #b7c6d9;
             font-size: 0.92rem;
-        }
-
-        .metric-label {
-            font-size: 0.95rem;
-            color: #c8d4e3;
         }
 
         h1, h2, h3 {
@@ -166,21 +161,15 @@ def make_column_names_unique(columns: List[str]) -> List[str]:
     """
     Clean and make column names unique.
 
-    Why this matters:
     Real datasets often contain duplicate headers, blank headers,
     or headers with trailing spaces/newlines.
-
-    Example:
-    ["Age", "Age", " Salary "] becomes ["Age", "Age_1", "Salary"]
     """
     counts = {}
     new_columns = []
 
     for col in columns:
-        # Convert any header object to string and clean it
         clean_col = str(col).strip().replace("\n", " ")
 
-        # Replace empty-like headers with a default placeholder
         if clean_col == "" or clean_col.lower() in {"nan", "none", "null"}:
             clean_col = "Unnamed"
 
@@ -194,16 +183,10 @@ def make_column_names_unique(columns: List[str]) -> List[str]:
     return new_columns
 
 
+
 def score_header_row(row: pd.Series) -> float:
     """
-    Assign a simple score to a row to determine whether it looks like a header.
-
-    Higher score = more likely to be a real header row.
-
-    Signals that help a row look like a header:
-    - values are mostly strings
-    - not too many missing or unnamed cells
-    - values are reasonably unique
+    Assign a heuristic score to a row to decide whether it looks like a header.
     """
     row_str = row.fillna("").astype(str).str.strip()
 
@@ -215,18 +198,17 @@ def score_header_row(row: pd.Series) -> float:
     unique_ratio = row_str.nunique(dropna=False) / max(len(row_str), 1)
     alpha_ratio = row_str.apply(lambda x: any(ch.isalpha() for ch in x)).mean()
 
-    # Weighted heuristic score
     score = (alpha_ratio * 0.5) + (unique_ratio * 0.35) - (bad_ratio * 0.9)
     return score
 
 
-def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 5) -> int:
+
+def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 8) -> int:
     """
     Detect which row most likely contains the headers.
 
-    We inspect the first few rows and choose the one with the best score.
-    This makes the app more forgiving when files contain title rows or exports
-    with metadata above the actual header row.
+    This helps when files contain title rows, report captions,
+    or metadata lines above the actual dataset.
     """
     rows_to_check = min(max_rows_to_check, len(raw_data))
     if rows_to_check == 0:
@@ -244,6 +226,7 @@ def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 5) -> int
     return best_row
 
 
+
 def try_read_csv(uploaded_file) -> pd.DataFrame:
     """
     Robust CSV reader with fallback encodings.
@@ -256,30 +239,101 @@ def try_read_csv(uploaded_file) -> pd.DataFrame:
         return pd.read_csv(uploaded_file, header=None, encoding="latin1")
 
 
+
 def try_read_excel(uploaded_file) -> pd.DataFrame:
     """
     Robust Excel reader.
+
+    Fixes one of the major issues in the original app:
+    - supports xlsx / xls / xlsm / xlsb more gracefully
+    - reads the first sheet by default
+    - falls back across engines when possible
     """
+    filename = uploaded_file.name.lower()
     uploaded_file.seek(0)
-    return pd.read_excel(uploaded_file, engine="openpyxl", header=None)
+
+    # Try engine choice based on file extension first.
+    engine_candidates = []
+    if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
+        engine_candidates = ["openpyxl"]
+    elif filename.endswith(".xls"):
+        engine_candidates = ["xlrd", "openpyxl"]
+    elif filename.endswith(".xlsb"):
+        engine_candidates = ["pyxlsb", "openpyxl"]
+    else:
+        engine_candidates = [None, "openpyxl", "xlrd", "pyxlsb"]
+
+    last_error = None
+    for engine in engine_candidates:
+        try:
+            uploaded_file.seek(0)
+            if engine is None:
+                return pd.read_excel(uploaded_file, header=None)
+            return pd.read_excel(uploaded_file, engine=engine, header=None)
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise ValueError(
+        "Excel file could not be read. Make sure the file is a valid Excel file and that the required engine is installed. "
+        f"Last error: {last_error}"
+    )
+
 
 
 def try_read_json(uploaded_file) -> pd.DataFrame:
     """
     Robust JSON reader.
+
+    Handles normal JSON files, record-style JSON, and line-delimited JSON.
     """
     uploaded_file.seek(0)
-    data = pd.read_json(uploaded_file)
+    raw_bytes = uploaded_file.read()
 
-    # If the JSON loads into a dictionary-like structure,
-    # normalize nested records when possible.
-    if isinstance(data, dict):
-        return pd.json_normalize(data)
+    try:
+        text = raw_bytes.decode("utf-8")
+    except Exception:
+        text = raw_bytes.decode("latin1")
 
-    if not isinstance(data, pd.DataFrame):
-        return pd.DataFrame(data)
+    # First try standard JSON parsing through pandas.
+    try:
+        return pd.read_json(io.StringIO(text))
+    except Exception:
+        pass
 
-    return data
+    # Next try JSON Lines / NDJSON.
+    try:
+        return pd.read_json(io.StringIO(text), lines=True)
+    except Exception:
+        pass
+
+    # Finally, use Python objects and normalize manually.
+    import json
+    parsed = json.loads(text)
+
+    if isinstance(parsed, list):
+        return pd.json_normalize(parsed)
+    if isinstance(parsed, dict):
+        return pd.json_normalize(parsed)
+
+    return pd.DataFrame(parsed)
+
+
+
+def maybe_use_first_row_as_header(data: pd.DataFrame) -> bool:
+    """
+    Decide whether the first row of a DataFrame likely contains headers.
+
+    This is especially helpful for JSON data that may already have real headers.
+    We only use the first row as headers when the existing column names are mostly
+    generic integers such as 0, 1, 2, ...
+    """
+    if data.empty:
+        return False
+
+    generic_header = all(str(col).isdigit() for col in data.columns)
+    return generic_header
+
 
 
 def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
@@ -288,32 +342,30 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
 
     Supported formats:
     - CSV
-    - XLSX
+    - XLSX / XLS / XLSM / XLSB
     - JSON
 
     Cleaning steps:
-    - detect likely header row
+    - detect likely header row when needed
     - create unique cleaned column names
     - remove fully empty rows and columns
-    - reset index
+    - trim blank-like strings
+    - apply conservative type cleanup
     """
     try:
         filename = uploaded_file.name.lower()
 
         if filename.endswith(".csv"):
             raw_data = try_read_csv(uploaded_file)
-        elif filename.endswith(".xlsx"):
+            use_header_detection = True
+        elif filename.endswith((".xlsx", ".xls", ".xlsm", ".xlsb")):
             raw_data = try_read_excel(uploaded_file)
+            use_header_detection = True
         elif filename.endswith(".json"):
             raw_data = try_read_json(uploaded_file)
-            # If already structured correctly with real headers,
-            # lightly clean and return early.
-            if isinstance(raw_data, pd.DataFrame) and raw_data.columns.dtype != int:
-                raw_data.columns = make_column_names_unique(list(raw_data.columns))
-                raw_data = raw_data.dropna(axis=1, how="all").dropna(axis=0, how="all")
-                return raw_data.reset_index(drop=True)
+            use_header_detection = maybe_use_first_row_as_header(raw_data)
         else:
-            raise ValueError("Unsupported file format. Please upload CSV, XLSX, or JSON.")
+            raise ValueError("Unsupported file format. Please upload CSV, XLSX, XLS, XLSM, XLSB, or JSON.")
 
         if not isinstance(raw_data, pd.DataFrame):
             raw_data = pd.DataFrame(raw_data)
@@ -321,23 +373,36 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
         if raw_data.empty:
             raise ValueError("The uploaded file appears to be empty.")
 
-        header_row = detect_header_row(raw_data)
-        data = raw_data.iloc[header_row + 1:].copy()
+        if use_header_detection:
+            header_row = detect_header_row(raw_data)
+            data = raw_data.iloc[header_row + 1:].copy()
+            detected_columns = raw_data.iloc[header_row].tolist()
+            data.columns = make_column_names_unique(detected_columns)
+        else:
+            data = raw_data.copy()
+            data.columns = make_column_names_unique(list(data.columns))
 
-        # Use the chosen header row as column names
-        detected_columns = raw_data.iloc[header_row].tolist()
-        data.columns = make_column_names_unique(detected_columns)
+        # Replace blank strings with NaN for more reliable cleaning and profiling.
+        data = data.replace(r"^\s*$", np.nan, regex=True)
 
-        # Remove fully empty rows and columns
+        # Remove fully empty rows and columns.
         data = data.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
 
-        # Light first-pass conversion for numeric-looking columns
-        # This stays conservative and avoids expensive operations.
+        # Light first-pass cleanup for object columns.
         for col in data.columns:
             if data[col].dtype == "object":
-                stripped = data[col].astype(str).str.strip()
-                converted = pd.to_numeric(stripped, errors="ignore")
-                data[col] = converted
+                data[col] = data[col].astype(str).str.strip()
+                data.loc[data[col].str.lower().isin(["nan", "none", "null", ""]), col] = np.nan
+
+        # Try gentle numeric conversion only when the column clearly looks numeric.
+        for col in data.columns:
+            if data[col].dtype == "object":
+                numeric_candidate = clean_numeric_like_series(data[col])
+                non_null_original = data[col].notna().sum()
+                if non_null_original > 0:
+                    conversion_ratio = numeric_candidate.notna().sum() / non_null_original
+                    if conversion_ratio >= 0.90:
+                        data[col] = numeric_candidate
 
         return data
 
@@ -349,20 +414,55 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
 # ============================================================
 # HELPER FUNCTIONS: DATA PROFILING / TASK DETECTION
 # ============================================================
+def clean_numeric_like_series(series: pd.Series) -> pd.Series:
+    """
+    Clean a potentially numeric text column before conversion.
+
+    Handles common patterns like:
+    - commas: 1,200
+    - currency: $1200
+    - percentages: 45%
+    - negative numbers in parentheses: (500)
+    - extra spaces
+    """
+    cleaned = series.astype(str).str.strip()
+    cleaned = cleaned.replace(
+        {
+            "": np.nan,
+            "nan": np.nan,
+            "None": np.nan,
+            "none": np.nan,
+            "null": np.nan,
+            "NaN": np.nan,
+        }
+    )
+
+    # Handle accounting-style negatives like (1234)
+    cleaned = cleaned.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    cleaned = cleaned.str.replace(",", "", regex=False)
+    cleaned = cleaned.str.replace("$", "", regex=False)
+    cleaned = cleaned.str.replace("%", "", regex=False)
+
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+
 def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     """
     Return a compact dataset quality profile for display.
+
+    This uses the improved feature-type inference instead of raw pandas dtypes,
+    so numeric-looking text columns are counted correctly.
     """
     total_cells = data.shape[0] * data.shape[1] if not data.empty else 0
     missing_cells = int(data.isna().sum().sum()) if total_cells > 0 else 0
     duplicate_rows = int(data.duplicated().sum()) if not data.empty else 0
 
-    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = [c for c in data.columns if c not in numeric_cols]
+    profiled_data, numeric_cols, categorical_cols = infer_feature_types(data.copy())
 
     return {
-        "rows": int(data.shape[0]),
-        "columns": int(data.shape[1]),
+        "rows": int(profiled_data.shape[0]),
+        "columns": int(profiled_data.shape[1]),
         "missing_cells": missing_cells,
         "missing_pct": round((missing_cells / total_cells) * 100, 2) if total_cells > 0 else 0.0,
         "duplicate_rows": duplicate_rows,
@@ -371,23 +471,54 @@ def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     }
 
 
-def auto_detect_task(y_series: pd.Series) -> str:
-    """
-    Automatically infer whether the task is classification or regression.
 
-    Rule of thumb:
-    - Numeric target with many unique values -> regression
-    - Otherwise -> classification
+def infer_target_type(y_series: pd.Series, unique_ratio_threshold: float = 0.05) -> str:
+    """
+    Infer whether a target column should behave like a numerical target or a categorical target.
+
+    This fixes the original issue where the app relied too heavily on pandas dtype alone.
+    A target stored as strings like "0", "1", "2" or "$500" is now recognized more reliably.
     """
     y_non_null = y_series.dropna()
 
     if y_non_null.empty:
-        return "classification"
+        return "categorical"
 
+    # If already numeric, decide whether it behaves like continuous or categorical.
     if pd.api.types.is_numeric_dtype(y_non_null):
-        return "regression" if y_non_null.nunique() > max(15, len(y_non_null) * 0.05) else "classification"
+        unique_count = y_non_null.nunique()
+        unique_ratio = unique_count / max(len(y_non_null), 1)
+        if unique_count <= 15 or unique_ratio <= unique_ratio_threshold:
+            return "categorical"
+        return "numerical"
 
-    return "classification"
+    # If object/text, try numeric parsing.
+    numeric_candidate = clean_numeric_like_series(y_non_null)
+    conversion_ratio = numeric_candidate.notna().mean()
+
+    # Highly numeric-looking text target.
+    if conversion_ratio >= 0.90:
+        unique_count = numeric_candidate.nunique(dropna=True)
+        unique_ratio = unique_count / max(numeric_candidate.notna().sum(), 1)
+        if unique_count <= 15 or unique_ratio <= unique_ratio_threshold:
+            return "categorical"
+        return "numerical"
+
+    return "categorical"
+
+
+
+def auto_detect_task(y_series: pd.Series) -> str:
+    """
+    Automatically infer whether the task is classification or regression.
+
+    Improved version:
+    - recognizes numeric targets stored as text
+    - avoids misclassifying low-cardinality numeric targets as regression
+    """
+    target_type = infer_target_type(y_series)
+    return "regression" if target_type == "numerical" else "classification"
+
 
 
 def find_valid_targets(data: pd.DataFrame) -> List[str]:
@@ -424,14 +555,6 @@ def find_valid_targets(data: pd.DataFrame) -> List[str]:
 def convert_datetime_features(X: pd.DataFrame) -> pd.DataFrame:
     """
     Attempt to detect datetime-like columns and engineer useful parts.
-
-    Instead of dropping all datetime columns, we try to convert them into:
-    - year
-    - month
-    - day
-    - day of week
-
-    This gives the model a chance to learn from time information.
     """
     X = X.copy()
 
@@ -448,6 +571,7 @@ def convert_datetime_features(X: pd.DataFrame) -> pd.DataFrame:
                 X = X.drop(columns=[col])
 
     return X
+
 
 
 def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
@@ -477,6 +601,7 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
     return X, dropped_summary
 
 
+
 def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
     """
     Convert mixed-type columns to strings to avoid downstream transformer issues.
@@ -493,55 +618,19 @@ def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
     return X
 
 
-def clean_numeric_like_series(series: pd.Series) -> pd.Series:
-    """
-    Clean a potentially numeric text column before conversion.
-
-    Handles common patterns like:
-    - commas: 1,200
-    - currency: $1200
-    - percentages: 45%
-    - extra spaces
-
-    This function is intentionally lightweight to avoid slowing the app.
-    """
-    cleaned = (
-        series.astype(str)
-        .str.strip()
-        .replace(
-            {
-                "": np.nan,
-                "nan": np.nan,
-                "None": np.nan,
-                "none": np.nan,
-                "null": np.nan,
-            }
-        )
-        .str.replace(",", "", regex=False)
-        .str.replace("$", "", regex=False)
-        .str.replace("%", "", regex=False)
-    )
-    return pd.to_numeric(cleaned, errors="coerce")
-
 
 def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.85):
     """
     Infer numeric vs categorical columns more intelligently.
 
-    Why this is needed:
-    Some datasets store numbers as text, for example:
-    - "1000"
-    - "$2,500"
-    - "45%"
+    This fixes the second major issue in the original app.
 
     Logic:
     - keep already-numeric columns as numeric
+    - keep boolean columns as categorical
     - for object columns, attempt numeric conversion
-    - if enough non-null values convert successfully, treat as numeric
-    - otherwise keep as categorical
-
-    The threshold is set conservatively to avoid misclassifying
-    genuinely categorical columns.
+    - only classify as numeric when a strong share of non-null values converts
+    - protect low-cardinality code-like columns from being incorrectly treated as continuous
     """
     X = X.copy()
     numeric_cols = []
@@ -550,31 +639,48 @@ def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.85):
     for col in X.columns:
         series = X[col]
 
+        # Booleans are generally better handled as categorical.
+        if pd.api.types.is_bool_dtype(series):
+            X[col] = series.astype(str)
+            categorical_cols.append(col)
+            continue
+
+        # Native numeric columns stay numeric.
         if pd.api.types.is_numeric_dtype(series):
             numeric_cols.append(col)
             continue
 
+        # Object/text columns get deeper inspection.
         if series.dtype == "object":
-            numeric_candidate = clean_numeric_like_series(series)
+            # Columns with very low cardinality are usually categories, even when numeric-looking.
+            non_null = series.dropna()
+            unique_count = non_null.nunique()
+            unique_ratio = unique_count / max(len(non_null), 1) if len(non_null) > 0 else 0
 
+            numeric_candidate = clean_numeric_like_series(series)
             non_null_original = series.notna().sum()
 
-            # If there are no non-null values, keep as categorical
             if non_null_original == 0:
                 categorical_cols.append(col)
                 continue
 
             converted_ratio = numeric_candidate.notna().sum() / non_null_original
 
-            if converted_ratio >= numeric_threshold:
+            # Protect ID/code-like columns from being forced into numeric.
+            looks_like_category_code = (unique_count <= 12 and unique_ratio <= 0.20)
+
+            if converted_ratio >= numeric_threshold and not looks_like_category_code:
                 X[col] = numeric_candidate
                 numeric_cols.append(col)
             else:
+                X[col] = series.astype(str)
                 categorical_cols.append(col)
         else:
+            X[col] = series.astype(str)
             categorical_cols.append(col)
 
     return X, numeric_cols, categorical_cols
+
 
 
 def build_preprocessor(X: pd.DataFrame):
@@ -588,22 +694,12 @@ def build_preprocessor(X: pd.DataFrame):
     Categorical:
     - most frequent imputation
     - one-hot encoding
-
-    This version uses smarter feature-type inference so numeric-looking
-    text columns are not incorrectly forced into categorical encoding.
     """
     X = X.copy()
 
-    # Try to extract features from datetime-like columns
     X = convert_datetime_features(X)
-
-    # Remove obviously problematic columns
     X, dropped_summary = drop_problematic_columns(X)
-
-    # Standardize mixed-type columns so encoders behave consistently
     X = standardize_mixed_columns(X)
-
-    # Smarter numeric/categorical detection
     X, numeric_cols, categorical_cols = infer_feature_types(X)
 
     numeric_transformer = Pipeline(
@@ -620,11 +716,14 @@ def build_preprocessor(X: pd.DataFrame):
         ]
     )
 
+    transformers = []
+    if numeric_cols:
+        transformers.append(("num", numeric_transformer, numeric_cols))
+    if categorical_cols:
+        transformers.append(("cat", categorical_transformer, categorical_cols))
+
     preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", numeric_transformer, numeric_cols),
-            ("cat", categorical_transformer, categorical_cols),
-        ],
+        transformers=transformers,
         remainder="drop"
     )
 
@@ -673,6 +772,7 @@ def get_models(task_type: str) -> Dict[str, object]:
     return models
 
 
+
 def build_pipeline(preprocessor, model) -> Pipeline:
     """
     Combine preprocessing and model into one reusable sklearn pipeline.
@@ -683,6 +783,7 @@ def build_pipeline(preprocessor, model) -> Pipeline:
             ("model", model),
         ]
     )
+
 
 
 def get_param_grid(model_name: str) -> Dict[str, List]:
@@ -711,6 +812,7 @@ def get_param_grid(model_name: str) -> Dict[str, List]:
         }
 
     return {}
+
 
 
 def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str) -> Pipeline:
@@ -744,6 +846,22 @@ def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_
         return pipeline
 
 
+
+def get_safe_cv_folds(y_train, task_type: str, preferred_folds: int = 5) -> int:
+    """
+    Choose a safe CV fold count.
+
+    This prevents failures on small datasets or imbalanced classification targets.
+    """
+    if task_type == "classification":
+        class_counts = pd.Series(y_train).value_counts()
+        min_class_count = int(class_counts.min()) if not class_counts.empty else 2
+        return max(2, min(preferred_folds, min_class_count))
+
+    return max(2, min(preferred_folds, len(y_train)))
+
+
+
 def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, task_type: str) -> pd.DataFrame:
     """
     Evaluate candidate models using cross-validation.
@@ -752,12 +870,10 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
     - score = mean accuracy
 
     For regression:
-    - score = mean RMSE
-      (lower is better)
-
-    Returns a DataFrame for easier sorting and display.
+    - score = mean RMSE (lower is better)
     """
     rows = []
+    cv_folds = get_safe_cv_folds(y_train, task_type, preferred_folds=5)
 
     for name, model in models.items():
         try:
@@ -768,7 +884,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                     pipeline,
                     X_train,
                     y_train,
-                    cv=5,
+                    cv=cv_folds,
                     scoring="accuracy",
                     n_jobs=None,
                 )
@@ -782,7 +898,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                     pipeline,
                     X_train,
                     y_train,
-                    cv=5,
+                    cv=cv_folds,
                     scoring="neg_root_mean_squared_error",
                     n_jobs=None,
                 )
@@ -827,6 +943,7 @@ def plot_model_results(results_df: pd.DataFrame, task_type: str) -> None:
     st.pyplot(fig)
 
 
+
 def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
     """
     Plot a simple target distribution to help users understand the modeling target.
@@ -841,7 +958,7 @@ def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
         ax.set_ylabel("Count")
         plt.xticks(rotation=25, ha="right")
     else:
-        numeric_target = pd.to_numeric(y_raw, errors="coerce").dropna()
+        numeric_target = clean_numeric_like_series(y_raw).dropna()
         ax.hist(numeric_target, bins=25)
         ax.set_title("Target Distribution")
         ax.set_xlabel("Target Value")
@@ -858,10 +975,8 @@ def safe_train_test_split(X, y, task_type: str):
     """
     Split data into train/test safely.
 
-    For classification, stratification is helpful, but it can fail when:
-    - one or more classes have too few examples
-
-    This function falls back gracefully when needed.
+    For classification, stratification is helpful, but it can fail when
+    one or more classes have too few examples.
     """
     if task_type == "classification":
         try:
@@ -875,7 +990,6 @@ def safe_train_test_split(X, y, task_type: str):
                     random_state=42,
                     stratify=y
                 )
-
         except Exception:
             pass
 
@@ -913,7 +1027,7 @@ def main():
     st.sidebar.write("4. Review results and download the best pipeline")
 
     with st.sidebar.expander("Supported file types", expanded=False):
-        st.write("CSV, XLSX, JSON")
+        st.write("CSV, XLSX, XLS, XLSM, XLSB, JSON")
 
     with st.sidebar.expander("What this app does", expanded=False):
         st.write(
@@ -921,6 +1035,7 @@ def main():
             - Cleans messy headers
             - Handles missing values
             - Detects numeric-like text columns
+            - Distinguishes categorical vs numerical features more reliably
             - Encodes categorical columns
             - Compares several ML models
             - Evaluates the best model
@@ -930,7 +1045,7 @@ def main():
 
     uploaded_file = st.file_uploader(
         "Upload your dataset",
-        type=["csv", "xlsx", "json"]
+        type=["csv", "xlsx", "xls", "xlsm", "xlsb", "json"]
     )
 
     if not uploaded_file:
@@ -1010,6 +1125,7 @@ def main():
             X = df_model.drop(columns=[target_column])
             y_raw = df_model[target_column]
 
+            # Remove rows with missing target.
             valid_idx = y_raw.dropna().index
             X = X.loc[valid_idx].copy()
             y_raw = y_raw.loc[valid_idx].copy()
@@ -1021,7 +1137,7 @@ def main():
             label_encoder = None
 
             if task_type == "regression":
-                y = pd.to_numeric(y_raw, errors="coerce")
+                y = clean_numeric_like_series(y_raw)
                 valid_idx = y.dropna().index
                 X = X.loc[valid_idx].copy()
                 y = y.loc[valid_idx].copy()
@@ -1031,7 +1147,16 @@ def main():
                     return
 
             else:
-                y = y_raw.astype(str)
+                y = y_raw.astype(str).str.strip()
+                y = y.replace({"": np.nan, "nan": np.nan, "None": np.nan, "null": np.nan})
+                valid_idx = y.dropna().index
+                X = X.loc[valid_idx].copy()
+                y = y.loc[valid_idx].copy()
+
+                if y.nunique() < 2:
+                    st.error("Classification requires at least two target classes.")
+                    return
+
                 label_encoder = LabelEncoder()
                 y = label_encoder.fit_transform(y)
 
@@ -1039,6 +1164,10 @@ def main():
 
             if X.empty or len(X.columns) == 0:
                 st.error("No valid feature columns remained after cleaning.")
+                return
+
+            if len(numeric_cols) == 0 and len(categorical_cols) == 0:
+                st.error("No usable features remained after preprocessing.")
                 return
 
             st.subheader("Feature Preparation Summary")
@@ -1072,11 +1201,7 @@ def main():
             st.dataframe(results_df, use_container_width=True)
             plot_model_results(results_df, task_type)
 
-            if task_type == "classification":
-                best_model_name = results_df.iloc[0]["Model"]
-            else:
-                best_model_name = results_df.iloc[0]["Model"]
-
+            best_model_name = results_df.iloc[0]["Model"]
             st.success(f"Best model selected: {best_model_name}")
 
             best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
@@ -1160,4 +1285,5 @@ def main():
 # ============================================================
 if __name__ == "__main__":
     main()
+
 # streamlit run automated_ml_tool.py
