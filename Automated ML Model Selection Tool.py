@@ -105,67 +105,241 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for a more polished interface
+# ------------------------------------------------------------
+# PROFESSIONAL UI STYLING
+# ------------------------------------------------------------
 st.markdown(
     """
     <style>
-        .main {
-            background: linear-gradient(135deg, #0A1128 0%, #001F54 40%, #034078 70%, #1282A2 100%);
+        /* Main app background */
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(49, 130, 206, 0.18), transparent 28%),
+                radial-gradient(circle at top right, rgba(56, 189, 248, 0.12), transparent 24%),
+                linear-gradient(180deg, #06111f 0%, #0b1728 42%, #0f1f35 100%);
+            color: #E6EEF8;
         }
 
+        /* Main container spacing */
         .block-container {
-            padding-top: 1.5rem;
-            padding-bottom: 2rem;
+            padding-top: 1.25rem;
+            padding-bottom: 2.25rem;
+            max-width: 1300px;
         }
 
-        .hero-card {
-            background: linear-gradient(135deg, rgba(46,120,255,0.18), rgba(0,191,165,0.12));
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 18px;
-            padding: 1.4rem 1.4rem 1.1rem 1.4rem;
-            margin-bottom: 1rem;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.18);
-        }
-
-        .section-card {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.07);
-            border-radius: 16px;
-            padding: 1rem 1rem 0.8rem 1rem;
-            margin-bottom: 1rem;
-        }
-
-        .tiny-note {
-            color: #b7c6d9;
-            font-size: 0.92rem;
-        }
-
-        h1, h2, h3 {
+        /* Typography */
+        h1, h2, h3, h4 {
+            color: #F8FBFF;
             letter-spacing: 0.2px;
         }
 
-        div[data-testid="stMetric"] {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            padding: 0.85rem;
-            border-radius: 14px;
+        p, label, span, div {
+            color: #D7E3F3;
         }
 
-        div[data-testid="stDataFrame"] {
-            border-radius: 12px;
+        /* Sidebar */
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(7,19,34,0.98), rgba(13,29,50,0.98));
+            border-right: 1px solid rgba(255,255,255,0.08);
+        }
+
+        section[data-testid="stSidebar"] * {
+            color: #E7F0FA !important;
+        }
+
+        /* Hero card */
+        .hero-card {
+            position: relative;
             overflow: hidden;
+            background:
+                linear-gradient(135deg, rgba(36, 78, 135, 0.55), rgba(10, 18, 40, 0.80)),
+                linear-gradient(135deg, rgba(59, 130, 246, 0.18), rgba(6, 182, 212, 0.12));
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 24px;
+            padding: 1.6rem 1.6rem 1.35rem 1.6rem;
+            margin-bottom: 1.2rem;
+            box-shadow: 0 20px 45px rgba(0,0,0,0.28);
         }
 
-        .stButton > button {
-            border-radius: 12px;
-            padding: 0.6rem 1rem;
+        .hero-card::after {
+            content: "";
+            position: absolute;
+            top: -80px;
+            right: -80px;
+            width: 220px;
+            height: 220px;
+            background: radial-gradient(circle, rgba(56,189,248,0.20), transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero-title {
+            font-size: 2.2rem;
+            font-weight: 800;
+            margin-bottom: 0.35rem;
+            color: #FFFFFF;
+        }
+
+        .hero-subtitle {
+            font-size: 1.02rem;
+            color: #DCE8F8;
+            margin-bottom: 0.55rem;
+        }
+
+        .hero-note {
+            font-size: 0.92rem;
+            color: #B9CBE0;
+            margin-bottom: 0;
+        }
+
+        /* General content cards */
+        .section-card {
+            background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.025));
+            border: 1px solid rgba(255,255,255,0.09);
+            border-radius: 20px;
+            padding: 1.15rem 1.15rem 0.95rem 1.15rem;
+            margin-bottom: 1.15rem;
+            box-shadow: 0 14px 35px rgba(0,0,0,0.18);
+            backdrop-filter: blur(8px);
+        }
+
+        .section-title {
+            font-size: 1.12rem;
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+            color: #F7FBFF;
+        }
+
+        .section-subtitle {
+            font-size: 0.94rem;
+            color: #B8C7DA;
+            margin-bottom: 0.9rem;
+        }
+
+        /* Feature highlight strip */
+        .mini-banner {
+            background: linear-gradient(90deg, rgba(59,130,246,0.12), rgba(34,197,94,0.07));
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            padding: 0.85rem 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .mini-banner strong {
+            color: #F8FBFF;
+        }
+
+        /* Upload card */
+        .upload-card {
+            background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+            border: 1px dashed rgba(148, 163, 184, 0.35);
+            border-radius: 18px;
+            padding: 0.6rem 0.8rem 0.3rem 0.8rem;
+            margin-bottom: 1rem;
+        }
+
+        /* Metric cards */
+        div[data-testid="stMetric"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.03));
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 0.95rem;
+            border-radius: 16px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }
+
+        div[data-testid="stMetricLabel"] {
+            color: #AFC4DB !important;
             font-weight: 600;
+        }
+
+        div[data-testid="stMetricValue"] {
+            color: #FFFFFF !important;
+            font-weight: 800;
+        }
+
+        /* Dataframes */
+        div[data-testid="stDataFrame"] {
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 14px;
+            overflow: hidden;
+            background: rgba(255,255,255,0.02);
+        }
+
+        /* Inputs */
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        textarea,
+        input {
+            border-radius: 12px !important;
+        }
+
+        /* Buttons */
+        .stButton > button {
+            width: 100%;
+            border-radius: 14px;
+            padding: 0.8rem 1rem;
+            font-weight: 700;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: linear-gradient(135deg, #2563EB, #0EA5E9);
+            color: white;
+            box-shadow: 0 10px 22px rgba(37, 99, 235, 0.28);
+        }
+
+        .stButton > button:hover {
+            border-color: rgba(255,255,255,0.14);
+            box-shadow: 0 12px 26px rgba(14, 165, 233, 0.32);
         }
 
         .stDownloadButton > button {
-            border-radius: 12px;
-            padding: 0.6rem 1rem;
-            font-weight: 600;
+            width: 100%;
+            border-radius: 14px;
+            padding: 0.8rem 1rem;
+            font-weight: 700;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: linear-gradient(135deg, #059669, #10B981);
+            color: white;
+            box-shadow: 0 10px 22px rgba(16, 185, 129, 0.25);
+        }
+
+        .stDownloadButton > button:hover {
+            border-color: rgba(255,255,255,0.14);
+        }
+
+        /* Expanders */
+        details {
+            background: rgba(255,255,255,0.025);
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 14px;
+            padding: 0.25rem 0.55rem;
+        }
+
+        /* Tabs */
+        button[data-baseweb="tab"] {
+            border-radius: 12px 12px 0 0 !important;
+        }
+
+        /* Footer */
+        .footer-card {
+            margin-top: 1.25rem;
+            background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.02));
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 18px;
+            padding: 0.95rem 1.1rem;
+            color: #BFD0E3;
+            font-size: 0.93rem;
+        }
+
+        /* Small muted text */
+        .tiny-note {
+            color: #AFC1D7;
+            font-size: 0.92rem;
+        }
+
+        /* Divider line look */
+        hr {
+            border: none;
+            height: 1px;
+            background: rgba(255,255,255,0.08);
+            margin: 1rem 0;
         }
     </style>
     """,
@@ -1259,27 +1433,49 @@ def get_prediction_scores(model, X_test):
 # MAIN APPLICATION
 # ============================================================
 def main():
+    # --------------------------------------------------------
+    # HERO SECTION
+    # --------------------------------------------------------
     st.markdown(
         """
         <div class="hero-card">
-            <h1 style="margin-bottom:0.3rem;">AutoML Model Selection Tool</h1>
-            <p style="margin-bottom:0.4rem; font-size:1.04rem;">
-                Upload a dataset, select your target, compare strong baseline models,
-                and export the best trained pipeline.
-            </p>
-            <p class="tiny-note" style="margin-bottom:0;">
-                Designed for a clean public demo experience while still handling messy real-world data.
-            </p>
+            <div class="hero-title">AutoML Model Selection Tool</div>
+            <div class="hero-subtitle">
+                Upload a dataset, choose a target, compare reliable baseline models,
+                and export your best trained machine learning pipeline.
+            </div>
+            <div class="hero-note">
+                Built for real-world data with safer preprocessing, task-aware metrics, and a cleaner public-facing experience.
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.sidebar.title("Workflow")
-    st.sidebar.write("1. Upload data")
-    st.sidebar.write("2. Choose target and features")
-    st.sidebar.write("3. Run model comparison")
-    st.sidebar.write("4. Review results and download the best pipeline")
+    st.markdown(
+        """
+        <div class="mini-banner">
+            <strong>What this tool helps you do:</strong>
+            clean messy data, detect feature types, compare strong baseline models, evaluate them properly,
+            and download the best trained end-to-end pipeline.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # --------------------------------------------------------
+    # SIDEBAR
+    # --------------------------------------------------------
+    st.sidebar.markdown("## Workflow")
+    st.sidebar.markdown(
+        """
+        **1. Upload data**  
+        **2. Choose target and features**  
+        **3. Compare models**  
+        **4. Review results**  
+        **5. Download trained pipeline**
+        """
+    )
 
     with st.sidebar.expander("Supported file types", expanded=False):
         st.write("CSV, XLSX, XLS, XLSM, XLSB, JSON")
@@ -1299,13 +1495,42 @@ def main():
             """
         )
 
+    with st.sidebar.expander("Professional note", expanded=False):
+        st.write(
+            """
+            This interface focuses on model comparison and strong baseline selection.
+            Strong metrics still depend on data quality, feature relevance, and target choice.
+            """
+        )
+
+    # --------------------------------------------------------
+    # UPLOAD SECTION
+    # --------------------------------------------------------
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Upload Dataset</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-subtitle">Start by uploading a structured dataset for automated model analysis.</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="upload-card">', unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
         "Upload your dataset",
         type=["csv", "xlsx", "xls", "xlsm", "xlsb", "json"],
     )
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if not uploaded_file:
         st.info("Upload a dataset to begin.")
+        st.markdown(
+            """
+            <div class="footer-card">
+                Ready for use once a dataset is uploaded. The interface will guide you through setup, evaluation, and export.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         return
 
     data = load_and_clean_data(uploaded_file)
@@ -1316,8 +1541,15 @@ def main():
 
     profile = get_dataset_profile(data)
 
+    # --------------------------------------------------------
+    # DATASET OVERVIEW
+    # --------------------------------------------------------
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Dataset Overview")
+    st.markdown('<div class="section-title">Dataset Overview</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-subtitle">A quick profile of the uploaded data before modeling begins.</div>',
+        unsafe_allow_html=True,
+    )
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Rows", f"{profile['rows']:,}")
@@ -1326,7 +1558,7 @@ def main():
     m4.metric("Duplicate Rows", f"{profile['duplicate_rows']:,}")
     m5.metric("Numeric / Categorical", f"{profile['numeric_cols']} / {profile['categorical_cols']}")
 
-    st.write("Preview")
+    st.markdown("#### Data Preview")
     st.dataframe(data.head(10), use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1336,8 +1568,15 @@ def main():
         st.error("No usable target columns were found.")
         return
 
+    # --------------------------------------------------------
+    # MODEL SETUP
+    # --------------------------------------------------------
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Model Setup")
+    st.markdown('<div class="section-title">Model Setup</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-subtitle">Choose the target, confirm the task type, and select the features for training.</div>',
+        unsafe_allow_html=True,
+    )
 
     col1, col2 = st.columns(2)
 
@@ -1373,7 +1612,19 @@ def main():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if st.button("Run AutoML", type="primary"):
+    # --------------------------------------------------------
+    # RUN SECTION
+    # --------------------------------------------------------
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Run Analysis</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="section-subtitle">Launch preprocessing, model comparison, training, evaluation, and pipeline export.</div>',
+        unsafe_allow_html=True,
+    )
+    run_automl = st.button("Run AutoML", type="primary")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if run_automl:
         with st.spinner("Preparing data, comparing models, and training the best pipeline..."):
             df_model = data[selected_features + [target_column]].copy()
             df_model = df_model.drop_duplicates().reset_index(drop=True)
@@ -1449,7 +1700,16 @@ def main():
                 st.error("No usable features remained after preprocessing.")
                 return
 
-            st.subheader("Feature Preparation Summary")
+            # ------------------------------------------------
+            # FEATURE PREPARATION SUMMARY
+            # ------------------------------------------------
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Feature Preparation Summary</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-subtitle">A breakdown of usable features after cleaning and preprocessing.</div>',
+                unsafe_allow_html=True,
+            )
+
             prep_col1, prep_col2, prep_col3, prep_col4 = st.columns(4)
             prep_col1.metric("Features Used", len(X.columns))
             prep_col2.metric("Numeric Features", len(numeric_cols))
@@ -1469,6 +1729,8 @@ def main():
                 st.write("Dropped for high missingness (> 60%):", dropped_summary["high_missing"] or "None")
                 st.write("Dropped for being constant:", dropped_summary["constant"] or "None")
                 st.write("Dropped for very high-cardinality text / likely IDs:", dropped_summary["high_cardinality"] or "None")
+
+            st.markdown("</div>", unsafe_allow_html=True)
 
             # -----------------------------
             # Split data
@@ -1490,29 +1752,41 @@ def main():
             # -----------------------------
             results_df, failures_df = evaluate_models(X_train, y_train, models, preprocessor, task_type)
 
-            if not failures_df.empty:
-                with st.expander("Models that failed during evaluation", expanded=False):
-                    st.dataframe(failures_df, use_container_width=True)
-
             if results_df.empty:
                 st.error("All models failed during evaluation.")
                 return
 
-            st.subheader("Model Comparison")
+            # ------------------------------------------------
+            # MODEL COMPARISON
+            # ------------------------------------------------
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Model Comparison</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-subtitle">Cross-validated model performance using task-appropriate ranking logic.</div>',
+                unsafe_allow_html=True,
+            )
+
+            if not failures_df.empty:
+                with st.expander("Models that failed during evaluation", expanded=False):
+                    st.dataframe(failures_df, use_container_width=True)
+
             st.dataframe(results_df, use_container_width=True)
             plot_model_results(results_df, task_type)
 
             best_model_name = results_df.iloc[0]["Model"]
+
             st.success(f"Best model selected: {best_model_name}")
 
             if task_type == "classification":
                 st.info(
-                    "Classification ranking uses Balanced Accuracy for imbalanced targets and F1 Weighted otherwise, which helps reduce misleadingly optimistic results."
+                    "Classification ranking uses Balanced Accuracy for imbalanced targets and F1 Weighted otherwise, helping reduce misleadingly optimistic results."
                 )
             else:
                 st.info(
                     "Regression ranking uses the lowest cross-validated RMSE, which is safer than relying on R² alone."
                 )
+
+            st.markdown("</div>", unsafe_allow_html=True)
 
             # -----------------------------
             # Train best model
@@ -1541,7 +1815,15 @@ def main():
                 st.error(f"Prediction failed: {summarize_exception(e)}")
                 return
 
-            st.subheader("Holdout Test Performance")
+            # ------------------------------------------------
+            # HOLDOUT TEST PERFORMANCE
+            # ------------------------------------------------
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Holdout Test Performance</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-subtitle">Final evaluation of the selected model on unseen test data.</div>',
+                unsafe_allow_html=True,
+            )
 
             # -----------------------------
             # Classification metrics
@@ -1572,12 +1854,12 @@ def main():
                         except Exception:
                             pass
 
-                st.write("Confusion Matrix")
+                st.markdown("#### Confusion Matrix")
                 cm = confusion_matrix(y_test, y_pred)
                 cm_df = pd.DataFrame(cm)
                 st.dataframe(cm_df, use_container_width=True)
 
-                st.write("Classification Report")
+                st.markdown("#### Classification Report")
                 report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
                 report_df = pd.DataFrame(report).transpose()
                 st.dataframe(report_df, use_container_width=True)
@@ -1634,6 +1916,8 @@ def main():
 
                 plot_actual_vs_predicted(y_test, y_pred)
 
+            st.markdown("</div>", unsafe_allow_html=True)
+
             # -----------------------------
             # Save artifact
             # -----------------------------
@@ -1656,6 +1940,16 @@ def main():
             joblib.dump(artifact, buffer)
             buffer.seek(0)
 
+            # ------------------------------------------------
+            # DOWNLOAD SECTION
+            # ------------------------------------------------
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">Export Best Pipeline</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="section-subtitle">Download the fitted preprocessing-and-model pipeline for reuse on future data.</div>',
+                unsafe_allow_html=True,
+            )
+
             st.download_button(
                 "Download Trained Pipeline",
                 data=buffer,
@@ -1664,6 +1958,20 @@ def main():
             )
 
             st.success("Done. Your best model has been trained and packaged for download.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # --------------------------------------------------------
+    # FOOTER
+    # --------------------------------------------------------
+    st.markdown(
+        """
+        <div class="footer-card">
+            <strong>AutoML Model Selection Tool</strong><br>
+            Professional UI layer with safer preprocessing, task-aware evaluation, and downloadable trained pipelines.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
