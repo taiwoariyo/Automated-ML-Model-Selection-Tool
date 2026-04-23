@@ -41,6 +41,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
+    classification_report,
     confusion_matrix,
     f1_score,
     mean_absolute_error,
@@ -48,6 +49,7 @@ from sklearn.metrics import (
     precision_score,
     r2_score,
     recall_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import (
     GridSearchCV,
@@ -66,9 +68,10 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     RandomForestRegressor,
 )
-from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
+from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge, LinearRegression
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.dummy import DummyClassifier, DummyRegressor
 
 # Silence noisy warnings to keep the public-facing experience cleaner
 warnings.filterwarnings("ignore")
@@ -238,7 +241,6 @@ def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 8) -> int
     return best_row
 
 
-
 def try_read_csv(uploaded_file) -> pd.DataFrame:
     """
     Robust CSV reader with fallback encodings.
@@ -249,7 +251,6 @@ def try_read_csv(uploaded_file) -> pd.DataFrame:
     except Exception:
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, header=None, encoding="latin1")
-
 
 
 def try_read_excel(uploaded_file) -> pd.DataFrame:
@@ -290,7 +291,6 @@ def try_read_excel(uploaded_file) -> pd.DataFrame:
     )
 
 
-
 def try_read_json(uploaded_file) -> pd.DataFrame:
     """
     Robust JSON reader.
@@ -326,7 +326,6 @@ def try_read_json(uploaded_file) -> pd.DataFrame:
     return pd.DataFrame(parsed)
 
 
-
 def maybe_use_first_row_as_header(data: pd.DataFrame) -> bool:
     """
     Decide whether the first row of a DataFrame likely contains headers.
@@ -336,7 +335,6 @@ def maybe_use_first_row_as_header(data: pd.DataFrame) -> bool:
 
     generic_header = all(str(col).isdigit() for col in data.columns)
     return generic_header
-
 
 
 def clean_numeric_like_series(series: pd.Series) -> pd.Series:
@@ -375,7 +373,6 @@ def clean_numeric_like_series(series: pd.Series) -> pd.Series:
     cleaned = cleaned.str.replace("%", "", regex=False)
 
     return pd.to_numeric(cleaned, errors="coerce")
-
 
 
 def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
@@ -483,7 +480,6 @@ def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.70):
     return X, numeric_cols, categorical_cols
 
 
-
 def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     """
     Return a compact dataset quality profile for display.
@@ -505,7 +501,6 @@ def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     }
 
 
-
 def auto_detect_task(y_series: pd.Series) -> str:
     """
     Automatically infer whether the task is classification or regression.
@@ -525,7 +520,6 @@ def auto_detect_task(y_series: pd.Series) -> str:
         return "regression" if numeric_candidate.nunique() > max(15, len(numeric_candidate.dropna()) * 0.05) else "classification"
 
     return "classification"
-
 
 
 def find_valid_targets(data: pd.DataFrame) -> List[str]:
@@ -575,7 +569,6 @@ def convert_datetime_features(X: pd.DataFrame) -> pd.DataFrame:
     return X
 
 
-
 def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
     """
     Remove problematic feature columns and track what was removed.
@@ -617,7 +610,6 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
     return X, dropped_summary
 
 
-
 def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
     """
     Standardize problematic mixed-type columns without destroying numeric information.
@@ -630,7 +622,6 @@ def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
             X.loc[X[col].str.lower().isin(["", "nan", "none", "null", "n/a"]), col] = np.nan
 
     return X
-
 
 
 def build_preprocessor(X: pd.DataFrame):
@@ -685,7 +676,6 @@ def is_imbalanced_classification(y) -> bool:
     return minority_share < 0.20
 
 
-
 def get_cv_strategy(y_train, task_type: str, preferred_folds: int = 5):
     """
     Return a safe and appropriate cross-validation splitter.
@@ -700,30 +690,33 @@ def get_cv_strategy(y_train, task_type: str, preferred_folds: int = 5):
     return KFold(n_splits=folds, shuffle=True, random_state=42)
 
 
-
 def get_classification_primary_metric(y_train) -> str:
     """
-    Use balanced accuracy on imbalanced targets and plain accuracy otherwise.
-    """
-    return "balanced_accuracy" if is_imbalanced_classification(y_train) else "accuracy"
+    Use balanced accuracy on imbalanced targets and F1 weighted otherwise.
 
+    Why this is safer:
+    - Accuracy can be misleading on imbalanced data
+    - F1 weighted gives a more rounded view than accuracy alone
+    """
+    return "balanced_accuracy" if is_imbalanced_classification(y_train) else "f1_weighted"
 
 
 def get_models(task_type: str) -> Dict[str, object]:
     """
     Return candidate models based on the task type.
 
-    These are strong general-purpose baseline models.
-    They improve your chances of finding a high-performing model,
-    but they do NOT guarantee perfect accuracy on every dataset.
+    Strong general-purpose baseline models are included,
+    plus a dummy baseline so users can compare against
+    a naive reference and avoid being misled.
     """
     if task_type == "classification":
         models = {
+            "Dummy Baseline": DummyClassifier(strategy="most_frequent"),
             "Logistic Regression": LogisticRegression(max_iter=10000, class_weight="balanced"),
             "Random Forest": RandomForestClassifier(n_estimators=300, random_state=42, class_weight="balanced"),
             "Extra Trees": ExtraTreesClassifier(n_estimators=300, random_state=42, class_weight="balanced"),
             "HistGradientBoosting": HistGradientBoostingClassifier(random_state=42),
-            "SVM": SVC(probability=False, class_weight="balanced"),
+            "SVM": SVC(probability=True, class_weight="balanced"),
             "KNN": KNeighborsClassifier(),
         }
 
@@ -747,6 +740,8 @@ def get_models(task_type: str) -> Dict[str, object]:
 
     else:
         models = {
+            "Dummy Baseline": DummyRegressor(strategy="mean"),
+            "Linear Regression": LinearRegression(),
             "Ridge": Ridge(),
             "ElasticNet": ElasticNet(random_state=42),
             "Random Forest": RandomForestRegressor(n_estimators=300, random_state=42),
@@ -776,7 +771,6 @@ def get_models(task_type: str) -> Dict[str, object]:
     return models
 
 
-
 def build_pipeline(preprocessor, model) -> Pipeline:
     """
     Combine preprocessing and model into one reusable sklearn pipeline.
@@ -787,7 +781,6 @@ def build_pipeline(preprocessor, model) -> Pipeline:
             ("model", model),
         ]
     )
-
 
 
 def get_param_grid(model_name: str, task_type: str) -> Dict[str, List]:
@@ -867,7 +860,6 @@ def get_param_grid(model_name: str, task_type: str) -> Dict[str, List]:
     return {}
 
 
-
 def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str):
     """
     Run GridSearchCV on supported models.
@@ -881,7 +873,11 @@ def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_
 
     try:
         cv_strategy = get_cv_strategy(y_train, task_type, preferred_folds=4)
-        scoring = get_classification_primary_metric(y_train) if task_type == "classification" else "neg_root_mean_squared_error"
+
+        if task_type == "classification":
+            scoring = get_classification_primary_metric(y_train)
+        else:
+            scoring = "neg_root_mean_squared_error"
 
         grid = GridSearchCV(
             estimator=pipeline,
@@ -900,15 +896,15 @@ def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_
         return pipeline, None
 
 
-
 def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, task_type: str) -> pd.DataFrame:
     """
     Evaluate candidate models using cross-validation.
 
-    Key improvement:
-    - classification is no longer judged only by plain accuracy
-    - imbalanced problems prefer balanced accuracy
-    - additional quality metrics are surfaced so poor models are less likely to mislead users
+    Improvements:
+    - Classification uses only classification metrics
+    - Regression uses only regression metrics
+    - Safer primary ranking metric is used for each task
+    - A dummy baseline is included so results are less misleading
     """
     rows = []
     cv_strategy = get_cv_strategy(y_train, task_type, preferred_folds=5)
@@ -922,15 +918,19 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                 scoring = {
                     "accuracy": "accuracy",
                     "balanced_accuracy": "balanced_accuracy",
+                    "precision_weighted": "precision_weighted",
+                    "recall_weighted": "recall_weighted",
                     "f1_weighted": "f1_weighted",
+                    "f1_macro": "f1_macro",
                 }
+
                 cv_results = cross_validate(
                     pipeline,
                     X_train,
                     y_train,
                     cv=cv_strategy,
                     scoring=scoring,
-                    n_jobs=None,
+                    n_jobs=-1,
                     error_score="raise",
                 )
 
@@ -938,25 +938,30 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                     {
                         "Model": name,
                         "Primary CV Score": float(np.mean(cv_results[f"test_{primary_metric}"])),
-                        "Score Type": "Balanced Accuracy" if primary_metric == "balanced_accuracy" else "Accuracy",
+                        "Score Type": "Balanced Accuracy" if primary_metric == "balanced_accuracy" else "F1 Weighted",
                         "Accuracy": float(np.mean(cv_results["test_accuracy"])),
                         "Balanced Accuracy": float(np.mean(cv_results["test_balanced_accuracy"])),
+                        "Precision Weighted": float(np.mean(cv_results["test_precision_weighted"])),
+                        "Recall Weighted": float(np.mean(cv_results["test_recall_weighted"])),
                         "F1 Weighted": float(np.mean(cv_results["test_f1_weighted"])),
+                        "F1 Macro": float(np.mean(cv_results["test_f1_macro"])),
                     }
                 )
+
             else:
                 scoring = {
                     "rmse": "neg_root_mean_squared_error",
                     "mae": "neg_mean_absolute_error",
                     "r2": "r2",
                 }
+
                 cv_results = cross_validate(
                     pipeline,
                     X_train,
                     y_train,
                     cv=cv_strategy,
                     scoring=scoring,
-                    n_jobs=None,
+                    n_jobs=-1,
                     error_score="raise",
                 )
 
@@ -977,6 +982,8 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
     results_df = pd.DataFrame(rows)
 
     if not results_df.empty:
+        # For regression, lower RMSE is better
+        # For classification, higher metric is better
         ascending = task_type == "regression"
         results_df = results_df.sort_values("Primary CV Score", ascending=ascending).reset_index(drop=True)
 
@@ -1009,7 +1016,6 @@ def plot_model_results(results_df: pd.DataFrame, task_type: str) -> None:
     st.pyplot(fig)
 
 
-
 def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
     """
     Plot a simple target distribution to help users understand the modeling target.
@@ -1030,6 +1036,22 @@ def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
         ax.set_xlabel("Target Value")
         ax.set_ylabel("Frequency")
 
+    plt.tight_layout()
+    st.pyplot(fig)
+
+
+def plot_actual_vs_predicted(y_test, y_pred) -> None:
+    """
+    Plot actual vs predicted values for regression tasks.
+    """
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(y_test, y_pred, alpha=0.7)
+    min_val = min(np.min(y_test), np.min(y_pred))
+    max_val = max(np.max(y_test), np.max(y_pred))
+    ax.plot([min_val, max_val], [min_val, max_val], linestyle="--")
+    ax.set_title("Actual vs Predicted")
+    ax.set_xlabel("Actual")
+    ax.set_ylabel("Predicted")
     plt.tight_layout()
     st.pyplot(fig)
 
@@ -1058,6 +1080,24 @@ def safe_train_test_split(X, y, task_type: str):
             pass
 
     return train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+def get_prediction_scores(model, X_test):
+    """
+    Safely get probability or decision scores for ROC AUC when available.
+    """
+    try:
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X_test)
+            if proba.ndim == 2 and proba.shape[1] >= 2:
+                return proba[:, 1]
+        if hasattr(model, "decision_function"):
+            scores = model.decision_function(X_test)
+            if isinstance(scores, np.ndarray):
+                return scores
+    except Exception:
+        pass
+    return None
 
 
 # ============================================================
@@ -1206,6 +1246,11 @@ def main():
                     st.error("The selected target could not be used for regression.")
                     return
 
+                if len(pd.Series(y).unique()) < 5:
+                    st.warning(
+                        "This target has very few unique numeric values. Double-check that this is truly a regression problem."
+                    )
+
             else:
                 y = y_raw.astype(str).str.strip()
                 y = y.replace({"": np.nan, "nan": np.nan, "None": np.nan, "null": np.nan})
@@ -1216,6 +1261,12 @@ def main():
                 if y.nunique() < 2:
                     st.error("Classification requires at least two target classes.")
                     return
+
+                rare_class_counts = y.value_counts()
+                if rare_class_counts.min() < 2:
+                    st.warning(
+                        "One or more classes have fewer than 2 samples. Some models or metrics may be less stable."
+                    )
 
                 label_encoder = LabelEncoder()
                 y = label_encoder.fit_transform(y)
@@ -1267,7 +1318,11 @@ def main():
 
             if task_type == "classification":
                 st.info(
-                    "Classification ranking uses balanced accuracy when the target looks imbalanced, which helps prevent misleadingly high accuracy scores."
+                    "Classification ranking uses Balanced Accuracy for imbalanced targets and F1 Weighted otherwise, which helps reduce misleadingly optimistic results."
+                )
+            else:
+                st.info(
+                    "Regression ranking uses the lowest cross-validated RMSE, which is safer than relying on R² alone."
                 )
 
             best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
@@ -1292,18 +1347,35 @@ def main():
                 bal_acc = balanced_accuracy_score(y_test, y_pred)
                 prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
                 rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
-                f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+                f1_w = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+                f1_m = f1_score(y_test, y_pred, average="macro", zero_division=0)
 
-                mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
                 mc1.metric("Accuracy", f"{acc:.3f}")
                 mc2.metric("Balanced Accuracy", f"{bal_acc:.3f}")
                 mc3.metric("Precision", f"{prec:.3f}")
                 mc4.metric("Recall", f"{rec:.3f}")
-                mc5.metric("F1 Score", f"{f1:.3f}")
+                mc5.metric("F1 Weighted", f"{f1_w:.3f}")
+                mc6.metric("F1 Macro", f"{f1_m:.3f}")
+
+                if len(np.unique(y_test)) == 2:
+                    score_values = get_prediction_scores(best_pipeline, X_test)
+                    if score_values is not None:
+                        try:
+                            auc = roc_auc_score(y_test, score_values)
+                            st.metric("ROC AUC", f"{auc:.3f}")
+                        except Exception:
+                            pass
 
                 st.write("Confusion Matrix")
                 cm = confusion_matrix(y_test, y_pred)
-                st.dataframe(pd.DataFrame(cm), use_container_width=True)
+                cm_df = pd.DataFrame(cm)
+                st.dataframe(cm_df, use_container_width=True)
+
+                st.write("Classification Report")
+                report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+                report_df = pd.DataFrame(report).transpose()
+                st.dataframe(report_df, use_container_width=True)
 
                 if label_encoder is not None:
                     with st.expander("Encoded class labels", expanded=False):
@@ -1321,10 +1393,25 @@ def main():
                 mae = mean_absolute_error(y_test, y_pred)
                 r2 = r2_score(y_test, y_pred)
 
-                mr1, mr2, mr3 = st.columns(3)
+                # Baseline comparison helps users see whether the model truly learned anything useful
+                baseline_model = DummyRegressor(strategy="mean")
+                baseline_pipeline = build_pipeline(preprocessor, baseline_model)
+                baseline_pipeline.fit(X_train, y_train)
+                baseline_pred = baseline_pipeline.predict(X_test)
+                baseline_rmse = np.sqrt(mean_squared_error(y_test, baseline_pred))
+
+                mr1, mr2, mr3, mr4 = st.columns(4)
                 mr1.metric("RMSE", f"{rmse:.3f}")
                 mr2.metric("MAE", f"{mae:.3f}")
                 mr3.metric("R²", f"{r2:.3f}")
+                mr4.metric("Baseline RMSE", f"{baseline_rmse:.3f}")
+
+                if rmse >= baseline_rmse:
+                    st.warning(
+                        "The selected regression model did not outperform the mean baseline on the holdout set. This suggests the dataset may need better features, more cleaning, or a different target."
+                    )
+
+                plot_actual_vs_predicted(y_test, y_pred)
 
             artifact = {
                 "pipeline": best_pipeline,
