@@ -24,6 +24,7 @@
 # -----------------------------
 import io
 import warnings
+import inspect
 from typing import Dict, List, Tuple, Optional
 
 # -----------------------------
@@ -73,8 +74,9 @@ from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.dummy import DummyClassifier, DummyRegressor
 
-# Silence noisy warnings to keep the public-facing experience cleaner
+# Silence noisy warnings for cleaner public app experience
 warnings.filterwarnings("ignore")
+
 
 # -----------------------------
 # Optional gradient boosting libraries
@@ -103,7 +105,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for a more polished, launch-ready interface
+# Custom CSS for a more polished interface
 st.markdown(
     """
     <style>
@@ -172,6 +174,45 @@ st.markdown(
 
 
 # ============================================================
+# HELPER FUNCTIONS: COMPATIBILITY / SAFETY
+# ============================================================
+def make_onehot_encoder():
+    """
+    Create a version-compatible OneHotEncoder.
+
+    Why this is needed:
+    - Newer sklearn uses: sparse_output=False
+    - Older sklearn uses: sparse=False
+
+    This avoids a version crash in public deployments.
+    """
+    params = inspect.signature(OneHotEncoder).parameters
+    if "sparse_output" in params:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+
+def safe_float(value, default=np.nan):
+    """
+    Convert a value to float safely.
+    """
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def summarize_exception(e: Exception) -> str:
+    """
+    Create a short readable error string for the UI.
+    """
+    msg = str(e).strip()
+    if not msg:
+        msg = e.__class__.__name__
+    return f"{e.__class__.__name__}: {msg}"
+
+
+# ============================================================
 # HELPER FUNCTIONS: DATA LOADING / CLEANING
 # ============================================================
 def make_column_names_unique(columns: List[str]) -> List[str]:
@@ -221,9 +262,6 @@ def score_header_row(row: pd.Series) -> float:
 def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 8) -> int:
     """
     Detect which row most likely contains the headers.
-
-    This helps when files contain title rows, report captions,
-    or metadata lines above the actual dataset.
     """
     rows_to_check = min(max_rows_to_check, len(raw_data))
     if rows_to_check == 0:
@@ -255,11 +293,7 @@ def try_read_csv(uploaded_file) -> pd.DataFrame:
 
 def try_read_excel(uploaded_file) -> pd.DataFrame:
     """
-    Robust Excel reader.
-
-    Supports xlsx / xls / xlsm / xlsb more gracefully,
-    reads the first sheet by default,
-    and falls back across engines when possible.
+    Robust Excel reader with engine fallbacks.
     """
     filename = uploaded_file.name.lower()
     uploaded_file.seek(0)
@@ -286,7 +320,7 @@ def try_read_excel(uploaded_file) -> pd.DataFrame:
             continue
 
     raise ValueError(
-        "Excel file could not be read. Make sure the file is a valid Excel file and that the required engine is installed. "
+        "Excel file could not be read. Make sure the file is valid and the required engine is installed. "
         f"Last error: {last_error}"
     )
 
@@ -295,7 +329,10 @@ def try_read_json(uploaded_file) -> pd.DataFrame:
     """
     Robust JSON reader.
 
-    Handles normal JSON files, record-style JSON, and line-delimited JSON.
+    Handles:
+    - normal JSON
+    - records-style JSON
+    - line-delimited JSON
     """
     uploaded_file.seek(0)
     raw_bytes = uploaded_file.read()
@@ -328,7 +365,7 @@ def try_read_json(uploaded_file) -> pd.DataFrame:
 
 def maybe_use_first_row_as_header(data: pd.DataFrame) -> bool:
     """
-    Decide whether the first row of a DataFrame likely contains headers.
+    Decide whether the first row likely contains headers.
     """
     if data.empty:
         return False
@@ -417,6 +454,7 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
                 data[col] = data[col].astype(str).str.strip()
                 data.loc[data[col].str.lower().isin(["nan", "none", "null", ""]), col] = np.nan
 
+        # Convert strongly numeric-looking object columns into numeric columns
         for col in data.columns:
             if data[col].dtype == "object":
                 numeric_candidate = clean_numeric_like_series(data[col])
@@ -504,22 +542,41 @@ def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
 def auto_detect_task(y_series: pd.Series) -> str:
     """
     Automatically infer whether the task is classification or regression.
+
+    Safer than the original logic because it avoids treating common
+    numeric-coded class labels (0/1/2, 1/2/3, etc.) as regression.
     """
     y_non_null = y_series.dropna()
 
     if y_non_null.empty:
         return "classification"
 
-    if pd.api.types.is_numeric_dtype(y_non_null):
-        return "regression" if y_non_null.nunique() > max(15, len(y_non_null) * 0.05) else "classification"
+    # If target is truly non-numeric, it is classification
+    if not pd.api.types.is_numeric_dtype(y_non_null):
+        numeric_candidate = clean_numeric_like_series(y_non_null)
+        conversion_ratio = numeric_candidate.notna().mean()
 
-    numeric_candidate = clean_numeric_like_series(y_non_null)
-    conversion_ratio = numeric_candidate.notna().mean()
+        if conversion_ratio < 0.90:
+            return "classification"
 
-    if conversion_ratio >= 0.80:
-        return "regression" if numeric_candidate.nunique() > max(15, len(numeric_candidate.dropna()) * 0.05) else "classification"
+        y_non_null = numeric_candidate.dropna()
 
-    return "classification"
+    # At this point target is numeric or numeric-like
+    unique_count = y_non_null.nunique()
+    n_rows = len(y_non_null)
+
+    # Strongly prefer classification for very low-cardinality numeric targets
+    if unique_count <= 10:
+        return "classification"
+
+    # Integer targets with a small ratio of unique values are often classes
+    is_integer_like = np.allclose(y_non_null, np.round(y_non_null), equal_nan=True)
+    unique_ratio = unique_count / max(n_rows, 1)
+
+    if is_integer_like and unique_ratio <= 0.05:
+        return "classification"
+
+    return "regression"
 
 
 def find_valid_targets(data: pd.DataFrame) -> List[str]:
@@ -554,7 +611,7 @@ def convert_datetime_features(X: pd.DataFrame) -> pd.DataFrame:
     """
     X = X.copy()
 
-    for col in X.columns:
+    for col in list(X.columns):
         if X[col].dtype == "object":
             parsed = pd.to_datetime(X[col], errors="coerce")
             parse_ratio = parsed.notna().mean()
@@ -612,7 +669,7 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
 
 def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
     """
-    Standardize problematic mixed-type columns without destroying numeric information.
+    Standardize mixed-type columns without destroying numeric information.
     """
     X = X.copy()
 
@@ -645,7 +702,7 @@ def build_preprocessor(X: pd.DataFrame):
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+            ("onehot", make_onehot_encoder()),
         ]
     )
 
@@ -658,6 +715,43 @@ def build_preprocessor(X: pd.DataFrame):
     preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
 
     return X, preprocessor, numeric_cols, categorical_cols, dropped_summary
+
+
+# ============================================================
+# HELPER FUNCTIONS: TARGET VALIDATION
+# ============================================================
+def validate_classification_target(y: pd.Series) -> Tuple[bool, str]:
+    """
+    Validate classification target before modeling.
+    """
+    y = pd.Series(y).dropna()
+
+    if y.empty:
+        return False, "The classification target is empty after cleaning."
+
+    if y.nunique() < 2:
+        return False, "Classification requires at least two target classes."
+
+    min_class_count = y.value_counts().min()
+    if min_class_count < 2:
+        return True, "One or more classes have fewer than 2 samples. Some models may be unstable."
+
+    return True, ""
+
+
+def validate_regression_target(y: pd.Series) -> Tuple[bool, str]:
+    """
+    Validate regression target before modeling.
+    """
+    y = pd.Series(y).dropna()
+
+    if y.empty:
+        return False, "The regression target is empty after cleaning."
+
+    if y.nunique() < 5:
+        return True, "This numeric target has very few unique values. Double-check that this is truly regression."
+
+    return True, ""
 
 
 # ============================================================
@@ -693,28 +787,32 @@ def get_cv_strategy(y_train, task_type: str, preferred_folds: int = 5):
 def get_classification_primary_metric(y_train) -> str:
     """
     Use balanced accuracy on imbalanced targets and F1 weighted otherwise.
-
-    Why this is safer:
-    - Accuracy can be misleading on imbalanced data
-    - F1 weighted gives a more rounded view than accuracy alone
     """
     return "balanced_accuracy" if is_imbalanced_classification(y_train) else "f1_weighted"
 
 
 def get_models(task_type: str) -> Dict[str, object]:
     """
-    Return candidate models based on the task type.
-
-    Strong general-purpose baseline models are included,
-    plus a dummy baseline so users can compare against
-    a naive reference and avoid being misled.
+    Return candidate models based on task type.
     """
     if task_type == "classification":
         models = {
             "Dummy Baseline": DummyClassifier(strategy="most_frequent"),
-            "Logistic Regression": LogisticRegression(max_iter=10000, class_weight="balanced"),
-            "Random Forest": RandomForestClassifier(n_estimators=300, random_state=42, class_weight="balanced"),
-            "Extra Trees": ExtraTreesClassifier(n_estimators=300, random_state=42, class_weight="balanced"),
+            "Logistic Regression": LogisticRegression(
+                max_iter=10000,
+                class_weight="balanced",
+                solver="lbfgs",
+            ),
+            "Random Forest": RandomForestClassifier(
+                n_estimators=300,
+                random_state=42,
+                class_weight="balanced",
+            ),
+            "Extra Trees": ExtraTreesClassifier(
+                n_estimators=300,
+                random_state=42,
+                class_weight="balanced",
+            ),
             "HistGradientBoosting": HistGradientBoostingClassifier(random_state=42),
             "SVM": SVC(probability=True, class_weight="balanced"),
             "KNN": KNeighborsClassifier(),
@@ -771,6 +869,46 @@ def get_models(task_type: str) -> Dict[str, object]:
     return models
 
 
+def filter_models_for_data(models: Dict[str, object], X_train, y_train, task_type: str) -> Dict[str, object]:
+    """
+    Remove models that are likely to fail on the current dataset.
+
+    This prevents public-facing crashes on tiny class counts or
+    very small sample sizes.
+    """
+    filtered = {}
+
+    n_samples = len(X_train)
+
+    if task_type == "classification":
+        y_series = pd.Series(y_train)
+        min_class_count = y_series.value_counts().min()
+        n_classes = y_series.nunique()
+
+        for name, model in models.items():
+            # KNN can fail if neighbors > class-fold sample sizes
+            if name == "KNN" and n_samples < 10:
+                continue
+
+            # Very tiny classes can make some models unstable
+            if name in {"SVM", "KNN"} and min_class_count < 2:
+                continue
+
+            # Some boosting libraries can be touchy in edge multiclass cases
+            if name in {"XGBoost", "LightGBM"} and n_classes < 2:
+                continue
+
+            filtered[name] = model
+
+    else:
+        for name, model in models.items():
+            if name == "KNN" and n_samples < 10:
+                continue
+            filtered[name] = model
+
+    return filtered
+
+
 def build_pipeline(preprocessor, model) -> Pipeline:
     """
     Combine preprocessing and model into one reusable sklearn pipeline.
@@ -786,9 +924,6 @@ def build_pipeline(preprocessor, model) -> Pipeline:
 def get_param_grid(model_name: str, task_type: str) -> Dict[str, List]:
     """
     Hyperparameter search spaces for supported models.
-
-    The grids are intentionally moderate to improve performance
-    without making the Streamlit app too slow.
     """
     if model_name == "Random Forest":
         return {
@@ -863,7 +998,7 @@ def get_param_grid(model_name: str, task_type: str) -> Dict[str, List]:
 def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str):
     """
     Run GridSearchCV on supported models.
-    If the model is not supported or tuning fails, return the original pipeline.
+    If tuning fails, return the original pipeline.
     """
     param_grid = get_param_grid(model_name, task_type)
 
@@ -885,6 +1020,7 @@ def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_
             cv=cv_strategy,
             scoring=scoring,
             n_jobs=-1,
+            error_score="raise",
         )
         grid.fit(X_train, y_train)
 
@@ -892,21 +1028,21 @@ def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_
         return grid.best_estimator_, grid.best_params_
 
     except Exception as e:
-        st.warning(f"Grid search skipped for {model_name}: {e}")
+        st.warning(f"Grid search skipped for {model_name}: {summarize_exception(e)}")
         return pipeline, None
 
 
-def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, task_type: str) -> pd.DataFrame:
+def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, task_type: str):
     """
     Evaluate candidate models using cross-validation.
 
-    Improvements:
-    - Classification uses only classification metrics
-    - Regression uses only regression metrics
-    - Safer primary ranking metric is used for each task
-    - A dummy baseline is included so results are less misleading
+    Important improvement:
+    - We do NOT silently hide model failures anymore.
+    - Failed models are reported back to the UI.
     """
     rows = []
+    failures = []
+
     cv_strategy = get_cv_strategy(y_train, task_type, preferred_folds=5)
 
     for name, model in models.items():
@@ -965,29 +1101,38 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                     error_score="raise",
                 )
 
+                rmse_cv = float(-np.mean(cv_results["test_rmse"]))
+                mae_cv = float(-np.mean(cv_results["test_mae"]))
+                r2_cv = float(np.mean(cv_results["test_r2"]))
+
                 rows.append(
                     {
                         "Model": name,
-                        "Primary CV Score": float(-np.mean(cv_results["test_rmse"])),
+                        "Primary CV Score": rmse_cv,
                         "Score Type": "RMSE",
-                        "RMSE": float(-np.mean(cv_results["test_rmse"])),
-                        "MAE": float(-np.mean(cv_results["test_mae"])),
-                        "R²": float(np.mean(cv_results["test_r2"])),
+                        "RMSE": rmse_cv,
+                        "MAE": mae_cv,
+                        "R²": r2_cv,
                     }
                 )
 
-        except Exception:
-            continue
+        except Exception as e:
+            failures.append(
+                {
+                    "Model": name,
+                    "Status": "Failed",
+                    "Reason": summarize_exception(e),
+                }
+            )
 
     results_df = pd.DataFrame(rows)
 
     if not results_df.empty:
-        # For regression, lower RMSE is better
-        # For classification, higher metric is better
         ascending = task_type == "regression"
         results_df = results_df.sort_values("Primary CV Score", ascending=ascending).reset_index(drop=True)
 
-    return results_df
+    failures_df = pd.DataFrame(failures)
+    return results_df, failures_df
 
 
 # ============================================================
@@ -1018,7 +1163,7 @@ def plot_model_results(results_df: pd.DataFrame, task_type: str) -> None:
 
 def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
     """
-    Plot a simple target distribution to help users understand the modeling target.
+    Plot a simple target distribution.
     """
     fig, ax = plt.subplots(figsize=(8, 4))
 
@@ -1044,11 +1189,16 @@ def plot_actual_vs_predicted(y_test, y_pred) -> None:
     """
     Plot actual vs predicted values for regression tasks.
     """
+    y_test = np.asarray(y_test)
+    y_pred = np.asarray(y_pred)
+
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.scatter(y_test, y_pred, alpha=0.7)
+
     min_val = min(np.min(y_test), np.min(y_pred))
     max_val = max(np.max(y_test), np.max(y_pred))
     ax.plot([min_val, max_val], [min_val, max_val], linestyle="--")
+
     ax.set_title("Actual vs Predicted")
     ax.set_xlabel("Actual")
     ax.set_ylabel("Predicted")
@@ -1089,14 +1239,19 @@ def get_prediction_scores(model, X_test):
     try:
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(X_test)
-            if proba.ndim == 2 and proba.shape[1] >= 2:
+            if isinstance(proba, np.ndarray) and proba.ndim == 2 and proba.shape[1] >= 2:
                 return proba[:, 1]
+
         if hasattr(model, "decision_function"):
             scores = model.decision_function(X_test)
             if isinstance(scores, np.ndarray):
-                return scores
+                if scores.ndim == 1:
+                    return scores
+                if scores.ndim == 2 and scores.shape[1] >= 2:
+                    return scores[:, 1]
     except Exception:
         pass
+
     return None
 
 
@@ -1226,6 +1381,7 @@ def main():
             X = df_model.drop(columns=[target_column])
             y_raw = df_model[target_column]
 
+            # Drop rows with missing target first
             valid_idx = y_raw.dropna().index
             X = X.loc[valid_idx].copy()
             y_raw = y_raw.loc[valid_idx].copy()
@@ -1236,41 +1392,53 @@ def main():
 
             label_encoder = None
 
+            # -----------------------------
+            # Prepare target based on task
+            # -----------------------------
             if task_type == "regression":
                 y = clean_numeric_like_series(y_raw)
                 valid_idx = y.dropna().index
                 X = X.loc[valid_idx].copy()
                 y = y.loc[valid_idx].copy()
 
-                if y.empty:
-                    st.error("The selected target could not be used for regression.")
+                ok, message = validate_regression_target(y)
+                if not ok:
+                    st.error(message)
                     return
-
-                if len(pd.Series(y).unique()) < 5:
-                    st.warning(
-                        "This target has very few unique numeric values. Double-check that this is truly a regression problem."
-                    )
+                if message:
+                    st.warning(message)
 
             else:
                 y = y_raw.astype(str).str.strip()
-                y = y.replace({"": np.nan, "nan": np.nan, "None": np.nan, "null": np.nan})
+                y = y.replace(
+                    {
+                        "": np.nan,
+                        "nan": np.nan,
+                        "NaN": np.nan,
+                        "None": np.nan,
+                        "none": np.nan,
+                        "null": np.nan,
+                        "NULL": np.nan,
+                    }
+                )
+
                 valid_idx = y.dropna().index
                 X = X.loc[valid_idx].copy()
                 y = y.loc[valid_idx].copy()
 
-                if y.nunique() < 2:
-                    st.error("Classification requires at least two target classes.")
+                ok, message = validate_classification_target(y)
+                if not ok:
+                    st.error(message)
                     return
-
-                rare_class_counts = y.value_counts()
-                if rare_class_counts.min() < 2:
-                    st.warning(
-                        "One or more classes have fewer than 2 samples. Some models or metrics may be less stable."
-                    )
+                if message:
+                    st.warning(message)
 
                 label_encoder = LabelEncoder()
                 y = label_encoder.fit_transform(y)
 
+            # -----------------------------
+            # Build preprocessing
+            # -----------------------------
             X, preprocessor, numeric_cols, categorical_cols, dropped_summary = build_preprocessor(X)
 
             if X.empty or len(X.columns) == 0:
@@ -1288,7 +1456,9 @@ def main():
             prep_col3.metric("Categorical Features", len(categorical_cols))
             prep_col4.metric(
                 "Dropped Columns",
-                len(dropped_summary["high_missing"]) + len(dropped_summary["constant"]) + len(dropped_summary["high_cardinality"]),
+                len(dropped_summary["high_missing"]) +
+                len(dropped_summary["constant"]) +
+                len(dropped_summary["high_cardinality"]),
             )
 
             with st.expander("See detected feature types", expanded=False):
@@ -1300,10 +1470,29 @@ def main():
                 st.write("Dropped for being constant:", dropped_summary["constant"] or "None")
                 st.write("Dropped for very high-cardinality text / likely IDs:", dropped_summary["high_cardinality"] or "None")
 
+            # -----------------------------
+            # Split data
+            # -----------------------------
             X_train, X_test, y_train, y_test = safe_train_test_split(X, y, task_type)
 
+            # -----------------------------
+            # Select and filter models
+            # -----------------------------
             models = get_models(task_type)
-            results_df = evaluate_models(X_train, y_train, models, preprocessor, task_type)
+            models = filter_models_for_data(models, X_train, y_train, task_type)
+
+            if not models:
+                st.error("No models are suitable for this dataset after safety checks.")
+                return
+
+            # -----------------------------
+            # Cross-validated comparison
+            # -----------------------------
+            results_df, failures_df = evaluate_models(X_train, y_train, models, preprocessor, task_type)
+
+            if not failures_df.empty:
+                with st.expander("Models that failed during evaluation", expanded=False):
+                    st.dataframe(failures_df, use_container_width=True)
 
             if results_df.empty:
                 st.error("All models failed during evaluation.")
@@ -1325,6 +1514,9 @@ def main():
                     "Regression ranking uses the lowest cross-validated RMSE, which is safer than relying on R² alone."
                 )
 
+            # -----------------------------
+            # Train best model
+            # -----------------------------
             best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
             best_params = None
 
@@ -1337,11 +1529,23 @@ def main():
                     task_type,
                 )
 
-            best_pipeline.fit(X_train, y_train)
-            y_pred = best_pipeline.predict(X_test)
+            try:
+                best_pipeline.fit(X_train, y_train)
+            except Exception as e:
+                st.error(f"Best model training failed: {summarize_exception(e)}")
+                return
+
+            try:
+                y_pred = best_pipeline.predict(X_test)
+            except Exception as e:
+                st.error(f"Prediction failed: {summarize_exception(e)}")
+                return
 
             st.subheader("Holdout Test Performance")
 
+            # -----------------------------
+            # Classification metrics
+            # -----------------------------
             if task_type == "classification":
                 acc = accuracy_score(y_test, y_pred)
                 bal_acc = balanced_accuracy_score(y_test, y_pred)
@@ -1358,6 +1562,7 @@ def main():
                 mc5.metric("F1 Weighted", f"{f1_w:.3f}")
                 mc6.metric("F1 Macro", f"{f1_m:.3f}")
 
+                # ROC AUC only makes sense safely in binary classification
                 if len(np.unique(y_test)) == 2:
                     score_values = get_prediction_scores(best_pipeline, X_test)
                     if score_values is not None:
@@ -1388,23 +1593,39 @@ def main():
                             )
                         )
 
+            # -----------------------------
+            # Regression metrics
+            # -----------------------------
             else:
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
                 mae = mean_absolute_error(y_test, y_pred)
                 r2 = r2_score(y_test, y_pred)
 
-                # Baseline comparison helps users see whether the model truly learned anything useful
+                # Baseline comparison
                 baseline_model = DummyRegressor(strategy="mean")
                 baseline_pipeline = build_pipeline(preprocessor, baseline_model)
                 baseline_pipeline.fit(X_train, y_train)
                 baseline_pred = baseline_pipeline.predict(X_test)
                 baseline_rmse = np.sqrt(mean_squared_error(y_test, baseline_pred))
+                baseline_mae = mean_absolute_error(y_test, baseline_pred)
+                baseline_r2 = r2_score(y_test, baseline_pred)
 
                 mr1, mr2, mr3, mr4 = st.columns(4)
                 mr1.metric("RMSE", f"{rmse:.3f}")
                 mr2.metric("MAE", f"{mae:.3f}")
                 mr3.metric("R²", f"{r2:.3f}")
                 mr4.metric("Baseline RMSE", f"{baseline_rmse:.3f}")
+
+                with st.expander("Baseline comparison", expanded=False):
+                    st.write(
+                        pd.DataFrame(
+                            {
+                                "Metric": ["RMSE", "MAE", "R²"],
+                                "Best Model": [rmse, mae, r2],
+                                "Baseline": [baseline_rmse, baseline_mae, baseline_r2],
+                            }
+                        )
+                    )
 
                 if rmse >= baseline_rmse:
                     st.warning(
@@ -1413,6 +1634,9 @@ def main():
 
                 plot_actual_vs_predicted(y_test, y_pred)
 
+            # -----------------------------
+            # Save artifact
+            # -----------------------------
             artifact = {
                 "pipeline": best_pipeline,
                 "task_type": task_type,
