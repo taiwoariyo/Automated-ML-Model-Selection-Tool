@@ -40,6 +40,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     confusion_matrix,
     f1_score,
     mean_absolute_error,
@@ -48,11 +49,24 @@ from sklearn.metrics import (
     r2_score,
     recall_score,
 )
-from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
+from sklearn.model_selection import (
+    GridSearchCV,
+    KFold,
+    StratifiedKFold,
+    cross_validate,
+    train_test_split,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
+from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 
@@ -150,7 +164,7 @@ st.markdown(
         }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
@@ -183,7 +197,6 @@ def make_column_names_unique(columns: List[str]) -> List[str]:
     return new_columns
 
 
-
 def score_header_row(row: pd.Series) -> float:
     """
     Assign a heuristic score to a row to decide whether it looks like a header.
@@ -200,7 +213,6 @@ def score_header_row(row: pd.Series) -> float:
 
     score = (alpha_ratio * 0.5) + (unique_ratio * 0.35) - (bad_ratio * 0.9)
     return score
-
 
 
 def detect_header_row(raw_data: pd.DataFrame, max_rows_to_check: int = 8) -> int:
@@ -244,15 +256,13 @@ def try_read_excel(uploaded_file) -> pd.DataFrame:
     """
     Robust Excel reader.
 
-    Fixes one of the major issues in the original app:
-    - supports xlsx / xls / xlsm / xlsb more gracefully
-    - reads the first sheet by default
-    - falls back across engines when possible
+    Supports xlsx / xls / xlsm / xlsb more gracefully,
+    reads the first sheet by default,
+    and falls back across engines when possible.
     """
     filename = uploaded_file.name.lower()
     uploaded_file.seek(0)
 
-    # Try engine choice based on file extension first.
     engine_candidates = []
     if filename.endswith(".xlsx") or filename.endswith(".xlsm"):
         engine_candidates = ["openpyxl"]
@@ -295,19 +305,16 @@ def try_read_json(uploaded_file) -> pd.DataFrame:
     except Exception:
         text = raw_bytes.decode("latin1")
 
-    # First try standard JSON parsing through pandas.
     try:
         return pd.read_json(io.StringIO(text))
     except Exception:
         pass
 
-    # Next try JSON Lines / NDJSON.
     try:
         return pd.read_json(io.StringIO(text), lines=True)
     except Exception:
         pass
 
-    # Finally, use Python objects and normalize manually.
     import json
     parsed = json.loads(text)
 
@@ -323,10 +330,6 @@ def try_read_json(uploaded_file) -> pd.DataFrame:
 def maybe_use_first_row_as_header(data: pd.DataFrame) -> bool:
     """
     Decide whether the first row of a DataFrame likely contains headers.
-
-    This is especially helpful for JSON data that may already have real headers.
-    We only use the first row as headers when the existing column names are mostly
-    generic integers such as 0, 1, 2, ...
     """
     if data.empty:
         return False
@@ -336,21 +339,48 @@ def maybe_use_first_row_as_header(data: pd.DataFrame) -> bool:
 
 
 
+def clean_numeric_like_series(series: pd.Series) -> pd.Series:
+    """
+    Clean a potentially numeric text column before conversion.
+
+    Handles:
+    - commas: 1,200
+    - currency: $1200
+    - percentages: 45%
+    - negatives in parentheses: (500)
+    - spaces
+    - common null tokens
+    """
+    cleaned = series.copy()
+    cleaned = cleaned.astype(str).str.strip()
+
+    cleaned = cleaned.replace(
+        {
+            "": np.nan,
+            "nan": np.nan,
+            "NaN": np.nan,
+            "None": np.nan,
+            "none": np.nan,
+            "null": np.nan,
+            "NULL": np.nan,
+            "N/A": np.nan,
+            "n/a": np.nan,
+            "NA": np.nan,
+        }
+    )
+
+    cleaned = cleaned.str.replace(r"^\((.+)\)$", r"-\1", regex=True)
+    cleaned = cleaned.str.replace(",", "", regex=False)
+    cleaned = cleaned.str.replace("$", "", regex=False)
+    cleaned = cleaned.str.replace("%", "", regex=False)
+
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+
 def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
     """
     Load the uploaded dataset and apply first-pass cleaning.
-
-    Supported formats:
-    - CSV
-    - XLSX / XLS / XLSM / XLSB
-    - JSON
-
-    Cleaning steps:
-    - detect likely header row when needed
-    - create unique cleaned column names
-    - remove fully empty rows and columns
-    - trim blank-like strings
-    - apply conservative type cleanup
     """
     try:
         filename = uploaded_file.name.lower()
@@ -382,19 +412,14 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
             data = raw_data.copy()
             data.columns = make_column_names_unique(list(data.columns))
 
-        # Replace blank strings with NaN for more reliable cleaning and profiling.
         data = data.replace(r"^\s*$", np.nan, regex=True)
-
-        # Remove fully empty rows and columns.
         data = data.dropna(axis=1, how="all").dropna(axis=0, how="all").reset_index(drop=True)
 
-        # Light first-pass cleanup for object columns.
         for col in data.columns:
             if data[col].dtype == "object":
                 data[col] = data[col].astype(str).str.strip()
                 data.loc[data[col].str.lower().isin(["nan", "none", "null", ""]), col] = np.nan
 
-        # Try gentle numeric conversion only when the column clearly looks numeric.
         for col in data.columns:
             if data[col].dtype == "object":
                 numeric_candidate = clean_numeric_like_series(data[col])
@@ -414,54 +439,54 @@ def load_and_clean_data(uploaded_file) -> Optional[pd.DataFrame]:
 # ============================================================
 # HELPER FUNCTIONS: DATA PROFILING / TASK DETECTION
 # ============================================================
-def clean_numeric_like_series(series: pd.Series) -> pd.Series:
+def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.70):
     """
-    Clean a potentially numeric text column before conversion.
-
-    Handles:
-    - commas: 1,200
-    - currency: $1200
-    - percentages: 45%
-    - negatives in parentheses: (500)
-    - spaces
-    - common null tokens
+    Infer numeric vs categorical columns more reliably.
     """
-    cleaned = series.copy()
+    X = X.copy()
+    numeric_cols = []
+    categorical_cols = []
 
-    # Convert to string only for cleaning
-    cleaned = cleaned.astype(str).str.strip()
+    for col in X.columns:
+        series = X[col]
 
-    # Standard missing markers
-    cleaned = cleaned.replace(
-        {
-            "": np.nan,
-            "nan": np.nan,
-            "NaN": np.nan,
-            "None": np.nan,
-            "none": np.nan,
-            "null": np.nan,
-            "NULL": np.nan,
-            "N/A": np.nan,
-            "n/a": np.nan,
-            "NA": np.nan,
-        }
-    )
+        if pd.api.types.is_bool_dtype(series):
+            X[col] = series.astype(str)
+            categorical_cols.append(col)
+            continue
 
-    # Convert accounting negatives like (123) -> -123
-    cleaned = cleaned.str.replace(r"^\((.+)\)$", r"-\1", regex=True)
+        if pd.api.types.is_numeric_dtype(series):
+            numeric_cols.append(col)
+            continue
 
-    # Remove common formatting symbols
-    cleaned = cleaned.str.replace(",", "", regex=False)
-    cleaned = cleaned.str.replace("$", "", regex=False)
-    cleaned = cleaned.str.replace("%", "", regex=False)
+        if pd.api.types.is_datetime64_any_dtype(series):
+            numeric_cols.append(col)
+            continue
 
-    return pd.to_numeric(cleaned, errors="coerce")
+        numeric_candidate = clean_numeric_like_series(series)
+        non_null_original = series.notna().sum()
+        non_null_converted = numeric_candidate.notna().sum()
+
+        if non_null_original == 0:
+            categorical_cols.append(col)
+            continue
+
+        converted_ratio = non_null_converted / non_null_original
+
+        if converted_ratio >= numeric_threshold:
+            X[col] = numeric_candidate
+            numeric_cols.append(col)
+        else:
+            X[col] = series.astype(str)
+            categorical_cols.append(col)
+
+    return X, numeric_cols, categorical_cols
+
 
 
 def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     """
     Return a compact dataset quality profile for display.
-    Uses inferred feature types instead of raw pandas dtypes.
     """
     total_cells = data.shape[0] * data.shape[1] if not data.empty else 0
     missing_cells = int(data.isna().sum().sum()) if total_cells > 0 else 0
@@ -480,41 +505,6 @@ def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     }
 
 
-def infer_target_type(y_series: pd.Series, unique_ratio_threshold: float = 0.05) -> str:
-    """
-    Infer whether a target column should behave like a numerical target or a categorical target.
-
-    This fixes the original issue where the app relied too heavily on pandas dtype alone.
-    A target stored as strings like "0", "1", "2" or "$500" is now recognized more reliably.
-    """
-    y_non_null = y_series.dropna()
-
-    if y_non_null.empty:
-        return "categorical"
-
-    # If already numeric, decide whether it behaves like continuous or categorical.
-    if pd.api.types.is_numeric_dtype(y_non_null):
-        unique_count = y_non_null.nunique()
-        unique_ratio = unique_count / max(len(y_non_null), 1)
-        if unique_count <= 15 or unique_ratio <= unique_ratio_threshold:
-            return "categorical"
-        return "numerical"
-
-    # If object/text, try numeric parsing.
-    numeric_candidate = clean_numeric_like_series(y_non_null)
-    conversion_ratio = numeric_candidate.notna().mean()
-
-    # Highly numeric-looking text target.
-    if conversion_ratio >= 0.90:
-        unique_count = numeric_candidate.nunique(dropna=True)
-        unique_ratio = unique_count / max(numeric_candidate.notna().sum(), 1)
-        if unique_count <= 15 or unique_ratio <= unique_ratio_threshold:
-            return "categorical"
-        return "numerical"
-
-    return "categorical"
-
-
 
 def auto_detect_task(y_series: pd.Series) -> str:
     """
@@ -525,11 +515,9 @@ def auto_detect_task(y_series: pd.Series) -> str:
     if y_non_null.empty:
         return "classification"
 
-    # If already numeric
     if pd.api.types.is_numeric_dtype(y_non_null):
         return "regression" if y_non_null.nunique() > max(15, len(y_non_null) * 0.05) else "classification"
 
-    # Try coercing numeric-like text targets
     numeric_candidate = clean_numeric_like_series(y_non_null)
     conversion_ratio = numeric_candidate.notna().mean()
 
@@ -539,14 +527,10 @@ def auto_detect_task(y_series: pd.Series) -> str:
     return "classification"
 
 
+
 def find_valid_targets(data: pd.DataFrame) -> List[str]:
     """
     Determine which columns are usable as target columns.
-
-    We exclude:
-    - unnamed/placeholder columns
-    - columns with very few non-null values
-    - columns with only one unique value
     """
     valid_targets = []
 
@@ -599,11 +583,13 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
     Removed columns include:
     - high-missing-value columns (> 60%)
     - constant columns
+    - extremely high-cardinality text columns that often memorize IDs
     """
     X = X.copy()
     dropped_summary = {
         "high_missing": [],
         "constant": [],
+        "high_cardinality": [],
     }
 
     high_missing_cols = X.columns[X.isna().mean() > 0.60].tolist()
@@ -616,6 +602,18 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
         dropped_summary["constant"] = constant_cols
         X = X.drop(columns=constant_cols)
 
+    high_card_cols = []
+    for col in X.columns:
+        if X[col].dtype == "object":
+            nunique = X[col].nunique(dropna=True)
+            ratio = nunique / max(len(X), 1)
+            if nunique > 100 and ratio > 0.80:
+                high_card_cols.append(col)
+
+    if high_card_cols:
+        dropped_summary["high_cardinality"] = high_card_cols
+        X = X.drop(columns=high_card_cols)
+
     return X, dropped_summary
 
 
@@ -623,15 +621,10 @@ def drop_problematic_columns(X: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, L
 def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
     """
     Standardize problematic mixed-type columns without destroying numeric information.
-
-    Important:
-    We do NOT blindly convert everything mixed to string anymore,
-    because that can hide numeric columns imported from Excel.
     """
     X = X.copy()
 
     for col in X.columns:
-        # Strip whitespace in object columns only
         if X[col].dtype == "object":
             X[col] = X[col].astype(str).str.strip()
             X.loc[X[col].str.lower().isin(["", "nan", "none", "null", "n/a"]), col] = np.nan
@@ -640,77 +633,9 @@ def standardize_mixed_columns(X: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def infer_feature_types(X: pd.DataFrame, numeric_threshold: float = 0.70):
-    """
-    Infer numeric vs categorical columns more reliably.
-
-    Logic:
-    - already numeric => numeric
-    - booleans => categorical
-    - object columns:
-        * try numeric coercion
-        * if most non-null values convert, treat as numeric
-        * otherwise categorical
-
-    This version is intentionally more practical for messy Excel data.
-    """
-    X = X.copy()
-    numeric_cols = []
-    categorical_cols = []
-
-    for col in X.columns:
-        series = X[col]
-
-        # Boolean columns are usually better treated as categorical
-        if pd.api.types.is_bool_dtype(series):
-            X[col] = series.astype(str)
-            categorical_cols.append(col)
-            continue
-
-        # Already numeric
-        if pd.api.types.is_numeric_dtype(series):
-            numeric_cols.append(col)
-            continue
-
-        # Datetime should not be treated as categorical here
-        if pd.api.types.is_datetime64_any_dtype(series):
-            numeric_cols.append(col)
-            continue
-
-        # Object / mixed columns
-        numeric_candidate = clean_numeric_like_series(series)
-        non_null_original = series.notna().sum()
-        non_null_converted = numeric_candidate.notna().sum()
-
-        if non_null_original == 0:
-            categorical_cols.append(col)
-            continue
-
-        converted_ratio = non_null_converted / non_null_original
-
-        # If most non-null values can be converted, it is numeric
-        if converted_ratio >= numeric_threshold:
-            X[col] = numeric_candidate
-            numeric_cols.append(col)
-        else:
-            X[col] = series.astype(str)
-            categorical_cols.append(col)
-
-    return X, numeric_cols, categorical_cols
-
-
-
 def build_preprocessor(X: pd.DataFrame):
     """
     Build a preprocessing pipeline for numeric and categorical columns.
-
-    Numeric:
-    - median imputation
-    - standard scaling
-
-    Categorical:
-    - most frequent imputation
-    - one-hot encoding
     """
     X = X.copy()
 
@@ -729,7 +654,7 @@ def build_preprocessor(X: pd.DataFrame):
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
         ]
     )
 
@@ -739,26 +664,66 @@ def build_preprocessor(X: pd.DataFrame):
     if categorical_cols:
         transformers.append(("cat", categorical_transformer, categorical_cols))
 
-    preprocessor = ColumnTransformer(
-        transformers=transformers,
-        remainder="drop"
-    )
+    preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
 
     return X, preprocessor, numeric_cols, categorical_cols, dropped_summary
 
 
 # ============================================================
-# HELPER FUNCTIONS: MODELS / PIPELINES / TUNING
+# HELPER FUNCTIONS: METRICS / CV / MODELS / TUNING
 # ============================================================
+def is_imbalanced_classification(y) -> bool:
+    """
+    Determine whether a classification target is notably imbalanced.
+    """
+    y_series = pd.Series(y)
+    if y_series.nunique() < 2:
+        return False
+
+    counts = y_series.value_counts(normalize=True)
+    minority_share = counts.min()
+    return minority_share < 0.20
+
+
+
+def get_cv_strategy(y_train, task_type: str, preferred_folds: int = 5):
+    """
+    Return a safe and appropriate cross-validation splitter.
+    """
+    if task_type == "classification":
+        class_counts = pd.Series(y_train).value_counts()
+        min_class_count = int(class_counts.min()) if not class_counts.empty else 2
+        folds = max(2, min(preferred_folds, min_class_count))
+        return StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
+
+    folds = max(2, min(preferred_folds, len(y_train)))
+    return KFold(n_splits=folds, shuffle=True, random_state=42)
+
+
+
+def get_classification_primary_metric(y_train) -> str:
+    """
+    Use balanced accuracy on imbalanced targets and plain accuracy otherwise.
+    """
+    return "balanced_accuracy" if is_imbalanced_classification(y_train) else "accuracy"
+
+
+
 def get_models(task_type: str) -> Dict[str, object]:
     """
     Return candidate models based on the task type.
+
+    These are strong general-purpose baseline models.
+    They improve your chances of finding a high-performing model,
+    but they do NOT guarantee perfect accuracy on every dataset.
     """
     if task_type == "classification":
         models = {
-            "Logistic Regression": LogisticRegression(max_iter=10000),
-            "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42),
-            "SVM": SVC(probability=False),
+            "Logistic Regression": LogisticRegression(max_iter=10000, class_weight="balanced"),
+            "Random Forest": RandomForestClassifier(n_estimators=300, random_state=42, class_weight="balanced"),
+            "Extra Trees": ExtraTreesClassifier(n_estimators=300, random_state=42, class_weight="balanced"),
+            "HistGradientBoosting": HistGradientBoostingClassifier(random_state=42),
+            "SVM": SVC(probability=False, class_weight="balanced"),
             "KNN": KNeighborsClassifier(),
         }
 
@@ -766,25 +731,47 @@ def get_models(task_type: str) -> Dict[str, object]:
             models["XGBoost"] = xgb.XGBClassifier(
                 eval_metric="logloss",
                 random_state=42,
-                n_estimators=200,
+                n_estimators=300,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
             )
 
         if LIGHTGBM_AVAILABLE:
-            models["LightGBM"] = lgb.LGBMClassifier(random_state=42, n_estimators=200)
+            models["LightGBM"] = lgb.LGBMClassifier(
+                random_state=42,
+                n_estimators=300,
+                learning_rate=0.05,
+            )
 
     else:
         models = {
-            "Linear Regression": LinearRegression(),
-            "Random Forest": RandomForestRegressor(n_estimators=200, random_state=42),
+            "Ridge": Ridge(),
+            "ElasticNet": ElasticNet(random_state=42),
+            "Random Forest": RandomForestRegressor(n_estimators=300, random_state=42),
+            "Extra Trees": ExtraTreesRegressor(n_estimators=300, random_state=42),
+            "HistGradientBoosting": HistGradientBoostingRegressor(random_state=42),
             "SVM": SVR(),
             "KNN": KNeighborsRegressor(),
         }
 
         if XGBOOST_AVAILABLE:
-            models["XGBoost"] = xgb.XGBRegressor(random_state=42, n_estimators=200)
+            models["XGBoost"] = xgb.XGBRegressor(
+                random_state=42,
+                n_estimators=300,
+                max_depth=6,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+            )
 
         if LIGHTGBM_AVAILABLE:
-            models["LightGBM"] = lgb.LGBMRegressor(random_state=42, n_estimators=200)
+            models["LightGBM"] = lgb.LGBMRegressor(
+                random_state=42,
+                n_estimators=300,
+                learning_rate=0.05,
+            )
 
     return models
 
@@ -803,79 +790,114 @@ def build_pipeline(preprocessor, model) -> Pipeline:
 
 
 
-def get_param_grid(model_name: str) -> Dict[str, List]:
+def get_param_grid(model_name: str, task_type: str) -> Dict[str, List]:
     """
     Hyperparameter search spaces for supported models.
+
+    The grids are intentionally moderate to improve performance
+    without making the Streamlit app too slow.
     """
     if model_name == "Random Forest":
         return {
-            "model__n_estimators": [100, 200],
-            "model__max_depth": [None, 8, 16],
+            "model__n_estimators": [200, 300],
+            "model__max_depth": [None, 10, 20],
             "model__min_samples_split": [2, 5],
+            "model__min_samples_leaf": [1, 2],
+        }
+
+    if model_name == "Extra Trees":
+        return {
+            "model__n_estimators": [200, 300],
+            "model__max_depth": [None, 10, 20],
+            "model__min_samples_split": [2, 5],
+            "model__min_samples_leaf": [1, 2],
+        }
+
+    if model_name == "HistGradientBoosting":
+        return {
+            "model__learning_rate": [0.03, 0.05, 0.1],
+            "model__max_depth": [None, 6, 12],
+            "model__max_iter": [100, 200],
         }
 
     if model_name == "XGBoost":
         return {
-            "model__n_estimators": [100, 200],
-            "model__max_depth": [3, 6],
-            "model__learning_rate": [0.05, 0.1],
+            "model__n_estimators": [200, 300],
+            "model__max_depth": [4, 6, 8],
+            "model__learning_rate": [0.03, 0.05, 0.1],
+            "model__subsample": [0.8, 1.0],
+            "model__colsample_bytree": [0.8, 1.0],
         }
 
     if model_name == "LightGBM":
         return {
-            "model__n_estimators": [100, 200],
+            "model__n_estimators": [200, 300],
             "model__num_leaves": [31, 63],
-            "model__learning_rate": [0.05, 0.1],
+            "model__learning_rate": [0.03, 0.05, 0.1],
+        }
+
+    if model_name == "Logistic Regression" and task_type == "classification":
+        return {
+            "model__C": [0.1, 1.0, 3.0],
+        }
+
+    if model_name == "Ridge" and task_type == "regression":
+        return {
+            "model__alpha": [0.1, 1.0, 10.0],
+        }
+
+    if model_name == "ElasticNet" and task_type == "regression":
+        return {
+            "model__alpha": [0.01, 0.1, 1.0],
+            "model__l1_ratio": [0.2, 0.5, 0.8],
+        }
+
+    if model_name == "KNN":
+        return {
+            "model__n_neighbors": [3, 5, 7, 11],
+            "model__weights": ["uniform", "distance"],
+        }
+
+    if model_name == "SVM":
+        return {
+            "model__C": [0.5, 1.0, 3.0],
+            "model__kernel": ["rbf", "linear"],
         }
 
     return {}
 
 
 
-def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str) -> Pipeline:
+def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str):
     """
     Run GridSearchCV on supported models.
     If the model is not supported or tuning fails, return the original pipeline.
     """
-    param_grid = get_param_grid(model_name)
+    param_grid = get_param_grid(model_name, task_type)
 
     if not param_grid:
         st.info(f"No tuning grid defined for {model_name}. Using default settings.")
-        return pipeline
+        return pipeline, None
 
     try:
-        scoring = "accuracy" if task_type == "classification" else "neg_root_mean_squared_error"
+        cv_strategy = get_cv_strategy(y_train, task_type, preferred_folds=4)
+        scoring = get_classification_primary_metric(y_train) if task_type == "classification" else "neg_root_mean_squared_error"
 
         grid = GridSearchCV(
             estimator=pipeline,
             param_grid=param_grid,
-            cv=3,
+            cv=cv_strategy,
             scoring=scoring,
             n_jobs=-1,
         )
         grid.fit(X_train, y_train)
 
         st.success(f"Best parameters for {model_name}: {grid.best_params_}")
-        return grid.best_estimator_
+        return grid.best_estimator_, grid.best_params_
 
     except Exception as e:
         st.warning(f"Grid search skipped for {model_name}: {e}")
-        return pipeline
-
-
-
-def get_safe_cv_folds(y_train, task_type: str, preferred_folds: int = 5) -> int:
-    """
-    Choose a safe CV fold count.
-
-    This prevents failures on small datasets or imbalanced classification targets.
-    """
-    if task_type == "classification":
-        class_counts = pd.Series(y_train).value_counts()
-        min_class_count = int(class_counts.min()) if not class_counts.empty else 2
-        return max(2, min(preferred_folds, min_class_count))
-
-    return max(2, min(preferred_folds, len(y_train)))
+        return pipeline, None
 
 
 
@@ -883,47 +905,71 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
     """
     Evaluate candidate models using cross-validation.
 
-    For classification:
-    - score = mean accuracy
-
-    For regression:
-    - score = mean RMSE (lower is better)
+    Key improvement:
+    - classification is no longer judged only by plain accuracy
+    - imbalanced problems prefer balanced accuracy
+    - additional quality metrics are surfaced so poor models are less likely to mislead users
     """
     rows = []
-    cv_folds = get_safe_cv_folds(y_train, task_type, preferred_folds=5)
+    cv_strategy = get_cv_strategy(y_train, task_type, preferred_folds=5)
 
     for name, model in models.items():
         try:
             pipeline = build_pipeline(preprocessor, clone(model))
 
             if task_type == "classification":
-                cv_scores = cross_val_score(
+                primary_metric = get_classification_primary_metric(y_train)
+                scoring = {
+                    "accuracy": "accuracy",
+                    "balanced_accuracy": "balanced_accuracy",
+                    "f1_weighted": "f1_weighted",
+                }
+                cv_results = cross_validate(
                     pipeline,
                     X_train,
                     y_train,
-                    cv=cv_folds,
-                    scoring="accuracy",
+                    cv=cv_strategy,
+                    scoring=scoring,
                     n_jobs=None,
+                    error_score="raise",
                 )
-                rows.append({
-                    "Model": name,
-                    "CV Score": float(np.mean(cv_scores)),
-                    "Score Type": "Accuracy",
-                })
+
+                rows.append(
+                    {
+                        "Model": name,
+                        "Primary CV Score": float(np.mean(cv_results[f"test_{primary_metric}"])),
+                        "Score Type": "Balanced Accuracy" if primary_metric == "balanced_accuracy" else "Accuracy",
+                        "Accuracy": float(np.mean(cv_results["test_accuracy"])),
+                        "Balanced Accuracy": float(np.mean(cv_results["test_balanced_accuracy"])),
+                        "F1 Weighted": float(np.mean(cv_results["test_f1_weighted"])),
+                    }
+                )
             else:
-                cv_scores = cross_val_score(
+                scoring = {
+                    "rmse": "neg_root_mean_squared_error",
+                    "mae": "neg_mean_absolute_error",
+                    "r2": "r2",
+                }
+                cv_results = cross_validate(
                     pipeline,
                     X_train,
                     y_train,
-                    cv=cv_folds,
-                    scoring="neg_root_mean_squared_error",
+                    cv=cv_strategy,
+                    scoring=scoring,
                     n_jobs=None,
+                    error_score="raise",
                 )
-                rows.append({
-                    "Model": name,
-                    "CV Score": float(-np.mean(cv_scores)),
-                    "Score Type": "RMSE",
-                })
+
+                rows.append(
+                    {
+                        "Model": name,
+                        "Primary CV Score": float(-np.mean(cv_results["test_rmse"])),
+                        "Score Type": "RMSE",
+                        "RMSE": float(-np.mean(cv_results["test_rmse"])),
+                        "MAE": float(-np.mean(cv_results["test_mae"])),
+                        "R²": float(np.mean(cv_results["test_r2"])),
+                    }
+                )
 
         except Exception:
             continue
@@ -932,7 +978,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
 
     if not results_df.empty:
         ascending = task_type == "regression"
-        results_df = results_df.sort_values("CV Score", ascending=ascending).reset_index(drop=True)
+        results_df = results_df.sort_values("Primary CV Score", ascending=ascending).reset_index(drop=True)
 
     return results_df
 
@@ -949,14 +995,17 @@ def plot_model_results(results_df: pd.DataFrame, task_type: str) -> None:
         return
 
     fig, ax = plt.subplots(figsize=(10, 5))
-
-    ax.bar(results_df["Model"], results_df["CV Score"])
+    ax.bar(results_df["Model"], results_df["Primary CV Score"])
     ax.set_title("Model Comparison", fontsize=14)
     ax.set_xlabel("Model")
-    ax.set_ylabel("CV Accuracy" if task_type == "classification" else "CV RMSE")
+
+    if task_type == "classification":
+        ax.set_ylabel(results_df.iloc[0]["Score Type"])
+    else:
+        ax.set_ylabel("CV RMSE")
+
     plt.xticks(rotation=25, ha="right")
     plt.tight_layout()
-
     st.pyplot(fig)
 
 
@@ -991,9 +1040,6 @@ def plot_target_distribution(y_raw: pd.Series, task_type: str) -> None:
 def safe_train_test_split(X, y, task_type: str):
     """
     Split data into train/test safely.
-
-    For classification, stratification is helpful, but it can fail when
-    one or more classes have too few examples.
     """
     if task_type == "classification":
         try:
@@ -1002,19 +1048,16 @@ def safe_train_test_split(X, y, task_type: str):
 
             if min_class_count >= 2:
                 return train_test_split(
-                    X, y,
+                    X,
+                    y,
                     test_size=0.2,
                     random_state=42,
-                    stratify=y
+                    stratify=y,
                 )
         except Exception:
             pass
 
-    return train_test_split(
-        X, y,
-        test_size=0.2,
-        random_state=42
-    )
+    return train_test_split(X, y, test_size=0.2, random_state=42)
 
 
 # ============================================================
@@ -1034,7 +1077,7 @@ def main():
             </p>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     st.sidebar.title("Workflow")
@@ -1054,15 +1097,16 @@ def main():
             - Detects numeric-like text columns
             - Distinguishes categorical vs numerical features more reliably
             - Encodes categorical columns
-            - Compares several ML models
-            - Evaluates the best model
+            - Compares several ML models more safely
+            - Uses better metrics for imbalanced classification
+            - Evaluates the best model on a holdout set
             - Exports the trained pipeline
             """
         )
 
     uploaded_file = st.file_uploader(
         "Upload your dataset",
-        type=["csv", "xlsx", "xls", "xlsm", "xlsb", "json"]
+        type=["csv", "xlsx", "xls", "xlsm", "xlsb", "json"],
     )
 
     if not uploaded_file:
@@ -1111,7 +1155,7 @@ def main():
             "Problem type",
             ["classification", "regression"],
             index=0 if detected_task == "classification" else 1,
-            horizontal=True
+            horizontal=True,
         )
 
     available_features = [col for col in data.columns if col != target_column]
@@ -1119,7 +1163,7 @@ def main():
     selected_features = st.multiselect(
         "Select feature columns",
         available_features,
-        default=available_features
+        default=available_features,
     )
 
     tune_model = st.checkbox("Tune supported models with Grid Search", value=False)
@@ -1142,7 +1186,6 @@ def main():
             X = df_model.drop(columns=[target_column])
             y_raw = df_model[target_column]
 
-            # Remove rows with missing target.
             valid_idx = y_raw.dropna().index
             X = X.loc[valid_idx].copy()
             y_raw = y_raw.loc[valid_idx].copy()
@@ -1194,7 +1237,7 @@ def main():
             prep_col3.metric("Categorical Features", len(categorical_cols))
             prep_col4.metric(
                 "Dropped Columns",
-                len(dropped_summary["high_missing"]) + len(dropped_summary["constant"])
+                len(dropped_summary["high_missing"]) + len(dropped_summary["constant"]) + len(dropped_summary["high_cardinality"]),
             )
 
             with st.expander("See detected feature types", expanded=False):
@@ -1204,6 +1247,7 @@ def main():
             with st.expander("See dropped columns", expanded=False):
                 st.write("Dropped for high missingness (> 60%):", dropped_summary["high_missing"] or "None")
                 st.write("Dropped for being constant:", dropped_summary["constant"] or "None")
+                st.write("Dropped for very high-cardinality text / likely IDs:", dropped_summary["high_cardinality"] or "None")
 
             X_train, X_test, y_train, y_test = safe_train_test_split(X, y, task_type)
 
@@ -1221,15 +1265,21 @@ def main():
             best_model_name = results_df.iloc[0]["Model"]
             st.success(f"Best model selected: {best_model_name}")
 
+            if task_type == "classification":
+                st.info(
+                    "Classification ranking uses balanced accuracy when the target looks imbalanced, which helps prevent misleadingly high accuracy scores."
+                )
+
             best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
+            best_params = None
 
             if tune_model:
-                best_pipeline = run_grid_search(
+                best_pipeline, best_params = run_grid_search(
                     best_model_name,
                     best_pipeline,
                     X_train,
                     y_train,
-                    task_type
+                    task_type,
                 )
 
             best_pipeline.fit(X_train, y_train)
@@ -1239,15 +1289,17 @@ def main():
 
             if task_type == "classification":
                 acc = accuracy_score(y_test, y_pred)
+                bal_acc = balanced_accuracy_score(y_test, y_pred)
                 prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
                 rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
                 f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
 
-                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1, mc2, mc3, mc4, mc5 = st.columns(5)
                 mc1.metric("Accuracy", f"{acc:.3f}")
-                mc2.metric("Precision", f"{prec:.3f}")
-                mc3.metric("Recall", f"{rec:.3f}")
-                mc4.metric("F1 Score", f"{f1:.3f}")
+                mc2.metric("Balanced Accuracy", f"{bal_acc:.3f}")
+                mc3.metric("Precision", f"{prec:.3f}")
+                mc4.metric("Recall", f"{rec:.3f}")
+                mc5.metric("F1 Score", f"{f1:.3f}")
 
                 st.write("Confusion Matrix")
                 cm = confusion_matrix(y_test, y_pred)
@@ -1255,10 +1307,14 @@ def main():
 
                 if label_encoder is not None:
                     with st.expander("Encoded class labels", expanded=False):
-                        st.write(pd.DataFrame({
-                            "Encoded Value": range(len(label_encoder.classes_)),
-                            "Original Label": label_encoder.classes_
-                        }))
+                        st.write(
+                            pd.DataFrame(
+                                {
+                                    "Encoded Value": range(len(label_encoder.classes_)),
+                                    "Original Label": label_encoder.classes_,
+                                }
+                            )
+                        )
 
             else:
                 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -1278,6 +1334,8 @@ def main():
                 "numeric_features_after_cleaning": numeric_cols,
                 "categorical_features_after_cleaning": categorical_cols,
                 "dropped_columns_summary": dropped_summary,
+                "best_model_name": best_model_name,
+                "best_model_params": best_params,
             }
 
             if task_type == "classification" and label_encoder is not None:
@@ -1291,7 +1349,7 @@ def main():
                 "Download Trained Pipeline",
                 data=buffer,
                 file_name="best_automl_pipeline.pkl",
-                mime="application/octet-stream"
+                mime="application/octet-stream",
             )
 
             st.success("Done. Your best model has been trained and packaged for download.")
