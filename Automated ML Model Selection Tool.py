@@ -965,6 +965,186 @@ def get_classification_primary_metric(y_train) -> str:
     return "balanced_accuracy" if is_imbalanced_classification(y_train) else "f1_weighted"
 
 
+def classify_reliability_level(score: float) -> str:
+    """
+    Convert a numeric reliability score into a plain-English label.
+
+    This is intentionally conservative because the app is public-facing.
+    A model should not be presented as reliable simply because it has
+    the highest score among weak alternatives.
+    """
+    if score >= 80:
+        return "Strong"
+    if score >= 60:
+        return "Moderate"
+    if score >= 40:
+        return "Caution"
+    return "Weak"
+
+
+def compute_reliability_score(
+    task_type: str,
+    best_holdout_metrics: Dict[str, float],
+    baseline_holdout_metrics: Dict[str, float],
+    cv_row: pd.Series,
+    n_rows: int,
+    n_features: int,
+    failed_model_count: int,
+) -> Tuple[int, List[str]]:
+    """
+    Score the reliability of the selected model from 0 to 100.
+
+    This is not a scientific guarantee. It is a practical public-facing
+    safety layer that checks whether the selected model:
+    - beats a simple baseline,
+    - has stable cross-validation results,
+    - has enough data,
+    - avoids obviously weak holdout performance,
+    - did not win only because many algorithms failed.
+    """
+    score = 100
+    warnings_list = []
+
+    # Penalize very small datasets because holdout and CV estimates become unstable.
+    if n_rows < 50:
+        score -= 25
+        warnings_list.append("Very small dataset. Results may change significantly with more data.")
+    elif n_rows < 150:
+        score -= 12
+        warnings_list.append("Small dataset. Treat the result as an early baseline, not a final production model.")
+
+    # Too many features compared with rows can cause overfitting.
+    if n_features > 0 and n_rows / max(n_features, 1) < 5:
+        score -= 12
+        warnings_list.append("There are many features relative to the number of rows. Overfitting risk is higher.")
+
+    if failed_model_count > 0:
+        score -= min(15, failed_model_count * 3)
+        warnings_list.append(f"{failed_model_count} model(s) failed during evaluation and were excluded.")
+
+    # Cross-validation variability check.
+    cv_std = safe_float(cv_row.get("Primary CV Std", np.nan))
+    cv_mean = safe_float(cv_row.get("Primary CV Score", np.nan))
+
+    if not np.isnan(cv_std):
+        if task_type == "classification":
+            if cv_std > 0.10:
+                score -= 12
+                warnings_list.append("Cross-validation scores vary a lot across folds. Model stability is questionable.")
+        else:
+            # For RMSE, use coefficient of variation when possible.
+            if cv_mean > 0 and (cv_std / cv_mean) > 0.25:
+                score -= 12
+                warnings_list.append("Regression error varies a lot across folds. Model stability is questionable.")
+
+    if task_type == "classification":
+        f1_macro_value = best_holdout_metrics.get("f1_macro", np.nan)
+        balanced_accuracy_value = best_holdout_metrics.get("balanced_accuracy", np.nan)
+
+        baseline_bal_acc = baseline_holdout_metrics.get("balanced_accuracy", np.nan)
+        improvement = balanced_accuracy_value - baseline_bal_acc
+
+        if not np.isnan(improvement) and improvement < 0.03:
+            score -= 25
+            warnings_list.append("The selected classifier barely improves over the dummy baseline.")
+
+        if not np.isnan(f1_macro_value) and f1_macro_value < 0.50:
+            score -= 15
+            warnings_list.append("Macro F1 is low, meaning at least some classes may be performing poorly.")
+
+        if not np.isnan(balanced_accuracy_value) and balanced_accuracy_value < 0.60:
+            score -= 15
+            warnings_list.append("Balanced accuracy is low. Accuracy alone may be misleading for this dataset.")
+
+    else:
+        rmse = best_holdout_metrics.get("rmse", np.nan)
+        baseline_rmse = baseline_holdout_metrics.get("rmse", np.nan)
+        r2_value = best_holdout_metrics.get("r2", np.nan)
+
+        if not np.isnan(rmse) and not np.isnan(baseline_rmse):
+            if rmse >= baseline_rmse:
+                score -= 35
+                warnings_list.append("The selected regressor does not beat the mean baseline on holdout RMSE.")
+            else:
+                improvement_pct = ((baseline_rmse - rmse) / baseline_rmse) * 100 if baseline_rmse != 0 else 0
+                if improvement_pct < 5:
+                    score -= 18
+                    warnings_list.append("The selected regressor improves only slightly over the mean baseline.")
+
+        if not np.isnan(r2_value) and r2_value < 0:
+            score -= 20
+            warnings_list.append("R² is negative, meaning the model is worse than a simple mean prediction on this test split.")
+
+    score = int(max(0, min(100, score)))
+    return score, warnings_list
+
+
+def build_reliability_report(
+    task_type: str,
+    best_model_name: str,
+    best_holdout_metrics: Dict[str, float],
+    baseline_holdout_metrics: Dict[str, float],
+    cv_row: pd.Series,
+    n_rows: int,
+    n_features: int,
+    failed_model_count: int,
+) -> Dict[str, object]:
+    """
+    Build a structured reliability report for display and export.
+
+    This gives users a clear interpretation instead of only showing raw scores.
+    """
+    score, warnings_list = compute_reliability_score(
+        task_type=task_type,
+        best_holdout_metrics=best_holdout_metrics,
+        baseline_holdout_metrics=baseline_holdout_metrics,
+        cv_row=cv_row,
+        n_rows=n_rows,
+        n_features=n_features,
+        failed_model_count=failed_model_count,
+    )
+
+    return {
+        "best_model_name": best_model_name,
+        "task_type": task_type,
+        "reliability_score": score,
+        "reliability_level": classify_reliability_level(score),
+        "warnings": warnings_list,
+        "cv_primary_score": safe_float(cv_row.get("Primary CV Score", np.nan)),
+        "cv_primary_std": safe_float(cv_row.get("Primary CV Std", np.nan)),
+        "holdout_metrics": best_holdout_metrics,
+        "baseline_metrics": baseline_holdout_metrics,
+    }
+
+
+def display_reliability_report(report: Dict[str, object]) -> None:
+    """
+    Display the model reliability report in Streamlit.
+    """
+    st.markdown("#### Reliability Verdict")
+
+    col_a, col_b = st.columns(2)
+    col_a.metric("Reliability Score", f"{report['reliability_score']}/100")
+    col_b.metric("Reliability Level", report["reliability_level"])
+
+    warnings_list = report.get("warnings", [])
+
+    if report["reliability_level"] in {"Strong", "Moderate"} and not warnings_list:
+        st.success("The selected model passed the main reliability checks for this dataset.")
+    elif report["reliability_level"] == "Moderate":
+        st.info("The selected model is usable as a baseline, but users should still review the warnings below.")
+    elif report["reliability_level"] == "Caution":
+        st.warning("Use caution. The model may be useful, but the results should not be presented as highly reliable.")
+    else:
+        st.error("Weak reliability. This model should not be presented to users as a dependable prediction system yet.")
+
+    if warnings_list:
+        st.markdown("##### Reliability warnings")
+        for item in warnings_list:
+            st.warning(item)
+
+
+
 def get_models(task_type: str) -> Dict[str, object]:
     """
     Return candidate models based on task type.
@@ -1248,9 +1428,12 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                     {
                         "Model": name,
                         "Primary CV Score": float(np.mean(cv_results[f"test_{primary_metric}"])),
+                        "Primary CV Std": float(np.std(cv_results[f"test_{primary_metric}"])),
                         "Score Type": "Balanced Accuracy" if primary_metric == "balanced_accuracy" else "F1 Weighted",
                         "Accuracy": float(np.mean(cv_results["test_accuracy"])),
+                        "Accuracy Std": float(np.std(cv_results["test_accuracy"])),
                         "Balanced Accuracy": float(np.mean(cv_results["test_balanced_accuracy"])),
+                        "Balanced Accuracy Std": float(np.std(cv_results["test_balanced_accuracy"])),
                         "Precision Weighted": float(np.mean(cv_results["test_precision_weighted"])),
                         "Recall Weighted": float(np.mean(cv_results["test_recall_weighted"])),
                         "F1 Weighted": float(np.mean(cv_results["test_f1_weighted"])),
@@ -1283,10 +1466,14 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                     {
                         "Model": name,
                         "Primary CV Score": rmse_cv,
+                        "Primary CV Std": float(np.std(-cv_results["test_rmse"])),
                         "Score Type": "RMSE",
                         "RMSE": rmse_cv,
+                        "RMSE Std": float(np.std(-cv_results["test_rmse"])),
                         "MAE": mae_cv,
+                        "MAE Std": float(np.std(-cv_results["test_mae"])),
                         "R²": r2_cv,
+                        "R² Std": float(np.std(cv_results["test_r2"])),
                     }
                 )
 
@@ -1774,8 +1961,14 @@ def main():
             plot_model_results(results_df, task_type)
 
             best_model_name = results_df.iloc[0]["Model"]
+            best_cv_row = results_df.iloc[0].copy()
 
             st.success(f"Best model selected: {best_model_name}")
+
+            if best_model_name == "Dummy Baseline":
+                st.warning(
+                    "The dummy baseline was selected as the best model. This is an honest signal that the current features may not contain enough predictive power."
+                )
 
             if task_type == "classification":
                 st.info(
@@ -1836,6 +2029,35 @@ def main():
                 f1_w = f1_score(y_test, y_pred, average="weighted", zero_division=0)
                 f1_m = f1_score(y_test, y_pred, average="macro", zero_division=0)
 
+                # Baseline comparison for classification.
+                # This protects users from being impressed by raw accuracy when a
+                # simple majority-class classifier performs almost as well.
+                baseline_model = DummyClassifier(strategy="most_frequent")
+                baseline_pipeline = build_pipeline(preprocessor, baseline_model)
+                baseline_pipeline.fit(X_train, y_train)
+                baseline_pred = baseline_pipeline.predict(X_test)
+
+                baseline_acc = accuracy_score(y_test, baseline_pred)
+                baseline_bal_acc = balanced_accuracy_score(y_test, baseline_pred)
+                baseline_f1_w = f1_score(y_test, baseline_pred, average="weighted", zero_division=0)
+                baseline_f1_m = f1_score(y_test, baseline_pred, average="macro", zero_division=0)
+
+                best_holdout_metrics = {
+                    "accuracy": acc,
+                    "balanced_accuracy": bal_acc,
+                    "precision_weighted": prec,
+                    "recall_weighted": rec,
+                    "f1_weighted": f1_w,
+                    "f1_macro": f1_m,
+                }
+
+                baseline_holdout_metrics = {
+                    "accuracy": baseline_acc,
+                    "balanced_accuracy": baseline_bal_acc,
+                    "f1_weighted": baseline_f1_w,
+                    "f1_macro": baseline_f1_m,
+                }
+
                 mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
                 mc1.metric("Accuracy", f"{acc:.3f}")
                 mc2.metric("Balanced Accuracy", f"{bal_acc:.3f}")
@@ -1843,6 +2065,29 @@ def main():
                 mc4.metric("Recall", f"{rec:.3f}")
                 mc5.metric("F1 Weighted", f"{f1_w:.3f}")
                 mc6.metric("F1 Macro", f"{f1_m:.3f}")
+
+                with st.expander("Baseline comparison", expanded=False):
+                    st.write(
+                        pd.DataFrame(
+                            {
+                                "Metric": ["Accuracy", "Balanced Accuracy", "F1 Weighted", "F1 Macro"],
+                                "Best Model": [acc, bal_acc, f1_w, f1_m],
+                                "Dummy Baseline": [baseline_acc, baseline_bal_acc, baseline_f1_w, baseline_f1_m],
+                            }
+                        )
+                    )
+
+                reliability_report = build_reliability_report(
+                    task_type=task_type,
+                    best_model_name=best_model_name,
+                    best_holdout_metrics=best_holdout_metrics,
+                    baseline_holdout_metrics=baseline_holdout_metrics,
+                    cv_row=best_cv_row,
+                    n_rows=len(X),
+                    n_features=len(X.columns),
+                    failed_model_count=len(failures_df),
+                )
+                display_reliability_report(reliability_report)
 
                 # ROC AUC only makes sense safely in binary classification
                 if len(np.unique(y_test)) == 2:
@@ -1909,6 +2154,30 @@ def main():
                         )
                     )
 
+                best_holdout_metrics = {
+                    "rmse": rmse,
+                    "mae": mae,
+                    "r2": r2,
+                }
+
+                baseline_holdout_metrics = {
+                    "rmse": baseline_rmse,
+                    "mae": baseline_mae,
+                    "r2": baseline_r2,
+                }
+
+                reliability_report = build_reliability_report(
+                    task_type=task_type,
+                    best_model_name=best_model_name,
+                    best_holdout_metrics=best_holdout_metrics,
+                    baseline_holdout_metrics=baseline_holdout_metrics,
+                    cv_row=best_cv_row,
+                    n_rows=len(X),
+                    n_features=len(X.columns),
+                    failed_model_count=len(failures_df),
+                )
+                display_reliability_report(reliability_report)
+
                 if rmse >= baseline_rmse:
                     st.warning(
                         "The selected regression model did not outperform the mean baseline on the holdout set. This suggests the dataset may need better features, more cleaning, or a different target."
@@ -1931,6 +2200,7 @@ def main():
                 "dropped_columns_summary": dropped_summary,
                 "best_model_name": best_model_name,
                 "best_model_params": best_params,
+                "reliability_report": reliability_report,
             }
 
             if task_type == "classification" and label_encoder is not None:
