@@ -713,44 +713,89 @@ def get_dataset_profile(data: pd.DataFrame) -> Dict[str, float]:
     }
 
 
-def auto_detect_task(y_series: pd.Series) -> str:
+def auto_detect_task(y_series: pd.Series) -> Tuple[str, str, bool]:
     """
-    Automatically infer whether the task is classification or regression.
+    Infer whether the task is classification or regression.
 
-    Safer than the original logic because it avoids treating common
-    numeric-coded class labels (0/1/2, 1/2/3, etc.) as regression.
+    Returns a tuple of:
+        (task_type, human_readable_reason, is_ambiguous)
+
+    Why this was rewritten:
+    The previous version forced ANY numeric target with <= 10 unique values
+    into classification. That silently mislabelled very common regression
+    targets such as 1-5 star ratings, counts (number of items, defects,
+    bedrooms), and small ordinal scores. Every downstream model and metric
+    was then built on the wrong problem framing.
+
+    The new logic is more conservative and, crucially, never *silently*
+    guesses in the genuinely ambiguous zone. It returns a reason string and
+    an `is_ambiguous` flag so the UI can explain the choice and prompt the
+    user to override with a single click when needed.
     """
     y_non_null = y_series.dropna()
 
     if y_non_null.empty:
-        return "classification"
+        return "classification", "Target is empty after cleaning; defaulting to classification.", False
 
-    # If target is truly non-numeric, it is classification
+    # Non-numeric (and not numeric-convertible) targets are text categories.
     if not pd.api.types.is_numeric_dtype(y_non_null):
         numeric_candidate = clean_numeric_like_series(y_non_null)
         conversion_ratio = numeric_candidate.notna().mean()
 
         if conversion_ratio < 0.90:
-            return "classification"
+            return (
+                "classification",
+                "Target is non-numeric text, so it is treated as categorical labels.",
+                False,
+            )
 
         y_non_null = numeric_candidate.dropna()
 
-    # At this point target is numeric or numeric-like
-    unique_count = y_non_null.nunique()
+    # From here the target is numeric (or numeric-like).
+    unique_count = int(y_non_null.nunique())
     n_rows = len(y_non_null)
-
-    # Strongly prefer classification for very low-cardinality numeric targets
-    if unique_count <= 10:
-        return "classification"
-
-    # Integer targets with a small ratio of unique values are often classes
-    is_integer_like = np.allclose(y_non_null, np.round(y_non_null), equal_nan=True)
     unique_ratio = unique_count / max(n_rows, 1)
+    is_integer_like = bool(np.allclose(y_non_null, np.round(y_non_null), equal_nan=True))
 
-    if is_integer_like and unique_ratio <= 0.05:
-        return "classification"
+    # Exactly two distinct values is almost always a binary classification target.
+    if unique_count == 2:
+        return "classification", "Target has exactly two distinct values (binary classification).", False
 
-    return "regression"
+    # Genuine decimals indicate a continuous quantity -> regression.
+    if not is_integer_like:
+        return "regression", "Target contains continuous (decimal) values, so it is treated as regression.", False
+
+    # Integer-valued targets below here.
+    # Many distinct integers, or a high distinct-to-rows ratio, look like a
+    # quantity/count rather than a fixed label set.
+    if unique_count > 20 or unique_ratio > 0.05:
+        return (
+            "regression",
+            f"Target has {unique_count} distinct integer values, which looks like a quantity or count.",
+            False,
+        )
+
+    # 3..20 distinct integers with a low ratio is genuinely ambiguous: it could
+    # be a small set of category codes OR an ordinal/count/rating. We pick a
+    # default but flag it loudly instead of pretending to be certain.
+    if unique_count <= 5:
+        return (
+            "classification",
+            (
+                f"Target has only {unique_count} distinct integer values, defaulted to classification. "
+                "If these numbers are ratings, scores, or counts rather than category codes, switch to Regression."
+            ),
+            True,
+        )
+
+    return (
+        "regression",
+        (
+            f"Target has {unique_count} distinct integer values, defaulted to regression. "
+            "If these numbers are actually category codes (labels), switch to Classification."
+        ),
+        True,
+    )
 
 
 def find_valid_targets(data: pd.DataFrame) -> List[str]:
@@ -994,8 +1039,9 @@ def compute_reliability_score(
     """
     Score the reliability of the selected model from 0 to 100.
 
-    This is not a scientific guarantee. It is a practical public-facing
-    safety layer that checks whether the selected model:
+    This is NOT a scientific guarantee and should be read as a rough,
+    heuristic safety layer, not a precise measurement. It checks whether the
+    selected model:
     - beats a simple baseline,
     - has stable cross-validation results,
     - has enough data,
@@ -1122,9 +1168,13 @@ def display_reliability_report(report: Dict[str, object]) -> None:
     Display the model reliability report in Streamlit.
     """
     st.markdown("#### Reliability Verdict")
+    st.caption(
+        "The reliability score is a rough heuristic, not a precise measurement. "
+        "Use it as a sanity check, not a guarantee."
+    )
 
     col_a, col_b = st.columns(2)
-    col_a.metric("Reliability Score", f"{report['reliability_score']}/100")
+    col_a.metric("Reliability Score (heuristic)", f"{report['reliability_score']}/100")
     col_b.metric("Reliability Level", report["reliability_level"])
 
     warnings_list = report.get("warnings", [])
@@ -1221,6 +1271,83 @@ def get_models(task_type: str) -> Dict[str, object]:
             )
 
     return models
+
+
+# Preference order used ONLY to break genuine ties between models whose scores
+# are statistically indistinguishable. Lower number = preferred. The intent is
+# to favor simpler, faster, more interpretable models when nothing separates
+# them on performance, and to never prefer the dummy baseline over a real model.
+MODEL_PREFERENCE = {
+    "Logistic Regression": 0,
+    "Linear Regression": 0,
+    "Ridge": 1,
+    "ElasticNet": 1,
+    "HistGradientBoosting": 2,
+    "LightGBM": 2,
+    "XGBoost": 3,
+    "Random Forest": 4,
+    "Extra Trees": 4,
+    "KNN": 5,
+    "SVM": 6,
+    "Dummy Baseline": 99,
+}
+
+
+def select_best_model(results_df: pd.DataFrame, task_type: str) -> Tuple[Optional[str], List[str]]:
+    """
+    Choose the best model in a variance-aware way.
+
+    Why this replaces the old `results_df.iloc[0]["Model"]` logic:
+    The previous code sorted purely on the mean CV score and crowned the top
+    row, even when the #1 and #2 models were separated by far less than their
+    own fold-to-fold noise. Re-running with a different seed could flip the
+    "winner", which is exactly what reads as unreliable to users.
+
+    Approach:
+    1. Find the top model on the primary metric.
+    2. Treat every model within ONE standard deviation of the top as tied
+       (these are not meaningfully distinguishable).
+    3. Prefer a real model over the dummy baseline when any real model is tied.
+    4. Break remaining ties by stability (lower CV std) and then by a simple
+       preference order favoring simpler/faster/interpretable models.
+
+    Returns (chosen_model_name, list_of_tied_model_names).
+    """
+    if results_df is None or results_df.empty:
+        return None, []
+
+    df = results_df.copy()
+
+    # Lower RMSE is better for regression; higher score is better for classification.
+    ascending = task_type == "regression"
+    df = df.sort_values("Primary CV Score", ascending=ascending).reset_index(drop=True)
+
+    top = df.iloc[0]
+    top_score = safe_float(top["Primary CV Score"], np.nan)
+    top_std = safe_float(top.get("Primary CV Std", 0.0), 0.0)
+    if np.isnan(top_std):
+        top_std = 0.0
+
+    if task_type == "regression":
+        tied = df[df["Primary CV Score"] <= top_score + top_std]
+    else:
+        tied = df[df["Primary CV Score"] >= top_score - top_std]
+
+    tied_names = list(tied["Model"])
+
+    # Prefer real models over the dummy baseline when any real model is tied.
+    non_dummy = tied[tied["Model"] != "Dummy Baseline"]
+    pool = non_dummy if not non_dummy.empty else tied
+
+    pool = pool.copy()
+    pool["__std"] = pool["Primary CV Std"].apply(lambda v: safe_float(v, 0.0)).fillna(0.0)
+    pool["__pref"] = pool["Model"].map(lambda m: MODEL_PREFERENCE.get(m, 50))
+
+    # Most stable first, then simplest/fastest.
+    pool = pool.sort_values(["__std", "__pref"], ascending=[True, True]).reset_index(drop=True)
+
+    best_name = pool.iloc[0]["Model"]
+    return best_name, tied_names
 
 
 def filter_models_for_data(models: Dict[str, object], X_train, y_train, task_type: str) -> Dict[str, object]:
@@ -1349,15 +1476,22 @@ def get_param_grid(model_name: str, task_type: str) -> Dict[str, List]:
     return {}
 
 
-def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str):
+def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_type: str, verbose: bool = True):
     """
     Run GridSearchCV on supported models.
-    If tuning fails, return the original pipeline.
+
+    Returns (best_estimator_or_original_pipeline, best_params_or_None).
+    If tuning fails or there is no grid, the original pipeline is returned.
+
+    `verbose` controls whether per-model Streamlit messages are emitted. It is
+    set to False when this runs inside the model-comparison loop so the UI is
+    not spammed with one message per candidate model.
     """
     param_grid = get_param_grid(model_name, task_type)
 
     if not param_grid:
-        st.info(f"No tuning grid defined for {model_name}. Using default settings.")
+        if verbose:
+            st.info(f"No tuning grid defined for {model_name}. Using default settings.")
         return pipeline, None
 
     try:
@@ -1378,30 +1512,69 @@ def run_grid_search(model_name: str, pipeline: Pipeline, X_train, y_train, task_
         )
         grid.fit(X_train, y_train)
 
-        st.success(f"Best parameters for {model_name}: {grid.best_params_}")
+        if verbose:
+            st.success(f"Best parameters for {model_name}: {grid.best_params_}")
         return grid.best_estimator_, grid.best_params_
 
     except Exception as e:
-        st.warning(f"Grid search skipped for {model_name}: {summarize_exception(e)}")
+        if verbose:
+            st.warning(f"Grid search skipped for {model_name}: {summarize_exception(e)}")
         return pipeline, None
 
 
-def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, task_type: str):
+def evaluate_models(
+    X_train,
+    y_train,
+    models: Dict[str, object],
+    preprocessor,
+    task_type: str,
+    tune: bool = False,
+):
     """
     Evaluate candidate models using cross-validation.
 
-    Important improvement:
-    - We do NOT silently hide model failures anymore.
-    - Failed models are reported back to the UI.
+    Key improvements over the original:
+    - Failed models are reported back to the UI instead of being hidden.
+    - When `tune` is True, EACH candidate model is tuned BEFORE it is scored,
+      so the comparison reflects every model's tuned performance. Previously
+      only the already-chosen winner was tuned, which meant a model that would
+      have won *with* tuning could never win because it was eliminated while
+      still running on default settings.
+    - The tuned hyperparameters are returned so the final pipeline that gets
+      shipped/exported is exactly the one that was scored in the table (the
+      comparison and the downloaded model can no longer disagree).
+
+    Note: when tuning, hyperparameters are chosen on the training data and then
+    cross-validated on that same training data, so the tuned scores are mildly
+    optimistic. This is consistent across all models (fair comparison) and is a
+    deliberate trade-off against the cost of full nested cross-validation.
+
+    Returns (results_df, failures_df, tuned_params) where tuned_params maps each
+    successfully evaluated model name to its best params (or None).
     """
     rows = []
     failures = []
+    tuned_params: Dict[str, Optional[dict]] = {}
 
     cv_strategy = get_cv_strategy(y_train, task_type, preferred_folds=5)
 
     for name, model in models.items():
         try:
-            pipeline = build_pipeline(preprocessor, clone(model))
+            base_pipeline = build_pipeline(preprocessor, clone(model))
+
+            # Determine the hyperparameters to evaluate this model with.
+            params_for_model = None
+            if tune and get_param_grid(name, task_type):
+                _, params_for_model = run_grid_search(
+                    name, base_pipeline, X_train, y_train, task_type, verbose=False
+                )
+
+            eval_pipeline = build_pipeline(preprocessor, clone(model))
+            if params_for_model:
+                try:
+                    eval_pipeline.set_params(**params_for_model)
+                except Exception:
+                    params_for_model = None  # fall back to defaults if params don't apply
 
             if task_type == "classification":
                 primary_metric = get_classification_primary_metric(y_train)
@@ -1415,7 +1588,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                 }
 
                 cv_results = cross_validate(
-                    pipeline,
+                    eval_pipeline,
                     X_train,
                     y_train,
                     cv=cv_strategy,
@@ -1430,6 +1603,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                         "Primary CV Score": float(np.mean(cv_results[f"test_{primary_metric}"])),
                         "Primary CV Std": float(np.std(cv_results[f"test_{primary_metric}"])),
                         "Score Type": "Balanced Accuracy" if primary_metric == "balanced_accuracy" else "F1 Weighted",
+                        "Tuned": bool(params_for_model),
                         "Accuracy": float(np.mean(cv_results["test_accuracy"])),
                         "Accuracy Std": float(np.std(cv_results["test_accuracy"])),
                         "Balanced Accuracy": float(np.mean(cv_results["test_balanced_accuracy"])),
@@ -1449,7 +1623,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                 }
 
                 cv_results = cross_validate(
-                    pipeline,
+                    eval_pipeline,
                     X_train,
                     y_train,
                     cv=cv_strategy,
@@ -1468,6 +1642,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                         "Primary CV Score": rmse_cv,
                         "Primary CV Std": float(np.std(-cv_results["test_rmse"])),
                         "Score Type": "RMSE",
+                        "Tuned": bool(params_for_model),
                         "RMSE": rmse_cv,
                         "RMSE Std": float(np.std(-cv_results["test_rmse"])),
                         "MAE": mae_cv,
@@ -1476,6 +1651,8 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
                         "R² Std": float(np.std(cv_results["test_r2"])),
                     }
                 )
+
+            tuned_params[name] = params_for_model
 
         except Exception as e:
             failures.append(
@@ -1493,7 +1670,7 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
         results_df = results_df.sort_values("Primary CV Score", ascending=ascending).reset_index(drop=True)
 
     failures_df = pd.DataFrame(failures)
-    return results_df, failures_df
+    return results_df, failures_df, tuned_params
 
 
 # ============================================================
@@ -1502,14 +1679,18 @@ def evaluate_models(X_train, y_train, models: Dict[str, object], preprocessor, t
 def plot_model_results(results_df: pd.DataFrame, task_type: str) -> None:
     """
     Display a clean single-plot bar chart comparing candidate models.
+
+    Error bars show the cross-validation standard deviation, making it visually
+    obvious when the top models are not meaningfully different.
     """
     if results_df.empty:
         st.warning("No valid models could be evaluated.")
         return
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(results_df["Model"], results_df["Primary CV Score"])
-    ax.set_title("Model Comparison", fontsize=14)
+    errors = results_df["Primary CV Std"] if "Primary CV Std" in results_df.columns else None
+    ax.bar(results_df["Model"], results_df["Primary CV Score"], yerr=errors, capsize=4)
+    ax.set_title("Model Comparison (error bars = CV std)", fontsize=14)
     ax.set_xlabel("Model")
 
     if task_type == "classification":
@@ -1677,6 +1858,7 @@ def main():
             - Encodes categorical columns
             - Compares several ML models more safely
             - Uses better metrics for imbalanced classification
+            - Treats statistically tied models as tied instead of forcing a single winner
             - Evaluates the best model on a holdout set
             - Exports the trained pipeline
             """
@@ -1771,13 +1953,23 @@ def main():
         target_column = st.selectbox("Select target column", valid_targets)
 
     with col2:
-        detected_task = auto_detect_task(data[target_column])
+        detected_task, detect_reason, detect_ambiguous = auto_detect_task(data[target_column])
         task_type = st.radio(
             "Problem type",
             ["classification", "regression"],
             index=0 if detected_task == "classification" else 1,
             horizontal=True,
         )
+
+    # Always explain WHY a task type was suggested, and flag ambiguous cases so
+    # the user is never silently locked into the wrong problem framing.
+    if detect_ambiguous:
+        st.warning(f"Auto-detected **{detected_task}** for this target, but this is ambiguous. {detect_reason}")
+    else:
+        st.caption(f"Auto-detected **{detected_task}**: {detect_reason}")
+
+    if task_type != detected_task:
+        st.info(f"You overrode the auto-detection and are running this as **{task_type}**.")
 
     available_features = [col for col in data.columns if col != target_column]
 
@@ -1787,7 +1979,15 @@ def main():
         default=available_features,
     )
 
-    tune_model = st.checkbox("Tune supported models with Grid Search", value=False)
+    tune_model = st.checkbox(
+        "Tune all supported models with Grid Search (slower, but makes the comparison fair)",
+        value=False,
+    )
+    if tune_model:
+        st.caption(
+            "With tuning on, every candidate model is tuned before being scored, "
+            "so the comparison reflects each model's tuned performance rather than its defaults."
+        )
 
     if not selected_features:
         st.warning("Please select at least one feature.")
@@ -1812,7 +2012,12 @@ def main():
     st.markdown("</div>", unsafe_allow_html=True)
 
     if run_automl:
-        with st.spinner("Preparing data, comparing models, and training the best pipeline..."):
+        spinner_msg = (
+            "Tuning and comparing models, then training the best pipeline..."
+            if tune_model
+            else "Preparing data, comparing models, and training the best pipeline..."
+        )
+        with st.spinner(spinner_msg):
             df_model = data[selected_features + [target_column]].copy()
             df_model = df_model.drop_duplicates().reset_index(drop=True)
 
@@ -1936,8 +2141,12 @@ def main():
 
             # -----------------------------
             # Cross-validated comparison
+            # (models are tuned here when tuning is enabled, so the table and
+            #  the exported model are guaranteed to match)
             # -----------------------------
-            results_df, failures_df = evaluate_models(X_train, y_train, models, preprocessor, task_type)
+            results_df, failures_df, tuned_params = evaluate_models(
+                X_train, y_train, models, preprocessor, task_type, tune=tune_model
+            )
 
             if results_df.empty:
                 st.error("All models failed during evaluation.")
@@ -1953,6 +2162,11 @@ def main():
                 unsafe_allow_html=True,
             )
 
+            if tune_model:
+                st.caption("Scores reflect each model's tuned hyperparameters.")
+            else:
+                st.caption("Scores reflect each model's default hyperparameters. Enable tuning above for a fairer comparison.")
+
             if not failures_df.empty:
                 with st.expander("Models that failed during evaluation", expanded=False):
                     st.dataframe(failures_df, use_container_width=True)
@@ -1960,10 +2174,21 @@ def main():
             st.dataframe(results_df, use_container_width=True)
             plot_model_results(results_df, task_type)
 
-            best_model_name = results_df.iloc[0]["Model"]
-            best_cv_row = results_df.iloc[0].copy()
+            # Variance-aware selection: treat statistically tied models as tied.
+            best_model_name, tied_models = select_best_model(results_df, task_type)
+            best_cv_row = results_df[results_df["Model"] == best_model_name].iloc[0].copy()
 
-            st.success(f"Best model selected: {best_model_name}")
+            if len(tied_models) > 1:
+                st.success(f"Selected model: {best_model_name}")
+                st.info(
+                    "Several models performed equivalently (within one standard deviation on the primary "
+                    "cross-validation metric): "
+                    + ", ".join(tied_models)
+                    + f". **{best_model_name}** was chosen for greater stability and simplicity. "
+                    "Differences this small may not be meaningful, so any of these is a reasonable choice."
+                )
+            else:
+                st.success(f"Best model selected: {best_model_name}")
 
             if best_model_name == "Dummy Baseline":
                 st.warning(
@@ -1983,18 +2208,17 @@ def main():
 
             # -----------------------------
             # Train best model
+            # (reuses the exact hyperparameters that were scored above, so the
+            #  exported pipeline matches the comparison table)
             # -----------------------------
             best_pipeline = build_pipeline(preprocessor, clone(models[best_model_name]))
-            best_params = None
+            best_params = tuned_params.get(best_model_name)
 
-            if tune_model:
-                best_pipeline, best_params = run_grid_search(
-                    best_model_name,
-                    best_pipeline,
-                    X_train,
-                    y_train,
-                    task_type,
-                )
+            if best_params:
+                try:
+                    best_pipeline.set_params(**best_params)
+                except Exception:
+                    best_params = None  # fall back to defaults if params don't apply
 
             try:
                 best_pipeline.fit(X_train, y_train)
@@ -2018,6 +2242,16 @@ def main():
                 unsafe_allow_html=True,
             )
 
+            # On very small holdout sets, the precise numbers below are unstable
+            # and should not be read as authoritative.
+            n_test = len(y_test)
+            if n_test < 25:
+                st.warning(
+                    f"Only {n_test} samples are in the holdout set. The metrics below are highly sensitive to the "
+                    "specific train/test split and should be read as rough indicators, not precise values. "
+                    "The cross-validation scores above (with their standard deviations) are the more trustworthy signal here."
+                )
+
             # -----------------------------
             # Classification metrics
             # -----------------------------
@@ -2033,7 +2267,7 @@ def main():
                 # This protects users from being impressed by raw accuracy when a
                 # simple majority-class classifier performs almost as well.
                 baseline_model = DummyClassifier(strategy="most_frequent")
-                baseline_pipeline = build_pipeline(preprocessor, baseline_model)
+                baseline_pipeline = build_pipeline(clone(preprocessor), baseline_model)
                 baseline_pipeline.fit(X_train, y_train)
                 baseline_pred = baseline_pipeline.predict(X_test)
 
@@ -2130,7 +2364,7 @@ def main():
 
                 # Baseline comparison
                 baseline_model = DummyRegressor(strategy="mean")
-                baseline_pipeline = build_pipeline(preprocessor, baseline_model)
+                baseline_pipeline = build_pipeline(clone(preprocessor), baseline_model)
                 baseline_pipeline.fit(X_train, y_train)
                 baseline_pred = baseline_pipeline.predict(X_test)
                 baseline_rmse = np.sqrt(mean_squared_error(y_test, baseline_pred))
@@ -2200,6 +2434,7 @@ def main():
                 "dropped_columns_summary": dropped_summary,
                 "best_model_name": best_model_name,
                 "best_model_params": best_params,
+                "tied_models": tied_models,
                 "reliability_report": reliability_report,
             }
 
@@ -2249,5 +2484,4 @@ def main():
 # ============================================================
 if __name__ == "__main__":
     main()
-
 # streamlit run automated_ml_tool.py
